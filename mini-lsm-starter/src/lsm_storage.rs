@@ -3,12 +3,12 @@
 use std::collections::HashMap;
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 
 use anyhow::{Ok, Result};
 use bytes::Bytes;
-use parking_lot::{Mutex, MutexGuard, RwLock, RwLockReadGuard};
+use parking_lot::{Mutex, MutexGuard, RwLock};
 
 use crate::block::Block;
 use crate::compact::{
@@ -292,10 +292,10 @@ impl LsmStorageInner {
         match state.memtable.get(key) {
             Some(value) => return_value(value),
             None => {
-                for imm_table in &state.imm_memtables {
+                for imm_table in state.imm_memtables.iter() {
                     match imm_table.get(key) {
                         Some(value) => return return_value(value),
-                        None => continue
+                        None => continue,
                     }
                 }
                 Ok(None)
@@ -308,24 +308,13 @@ impl LsmStorageInner {
         unimplemented!()
     }
 
-    /** check approximate size and freeze if needed.  
-
-    Caller should hold state's read lock, this method takes the ownership of read lock guard, and drop it manually.  
-
-    In this method, we will check approximate_size in MemTable first, so we need to take the state read lock first.
-    Because this method is called when put a new entry into memtable, so the read lock should always holded by caller.  
-
-    For performance issue, caller passes it's read guard and we drop it, so the process does not need to unlock and lock again.
-    */
-    fn try_freeze(&self, state: RwLockReadGuard<LsmStorageState>) -> Result<()> {
-        let approximate_size = state.memtable.approximate_size();
-        drop(state);  // now we can drop the read lock.
-
+    /// check approximate size and freeze if needed. Caller cannot holds state or state_lock.
+    fn try_freeze(&self, approximate_size: usize) -> Result<()> {
         if approximate_size > self.options.target_sst_size {
             let guard = self.state_lock.lock();
 
             // Now we need to check again. Because try_freeze is called concurrently.
-            // Cannot avoid to hold read lock again. Because lock sequence state_lock > state, preventing deadlock. 
+            // Cannot avoid to hold read lock again. Because lock sequence state_lock > state, preventing deadlock.
             let approximate_size = self.state.read().memtable.approximate_size();
             if approximate_size > self.options.target_sst_size {
                 // current thread gains the right to freeze
@@ -338,15 +327,28 @@ impl LsmStorageInner {
 
     /// Put a key-value pair into the storage by writing into the current memtable.
     pub fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
-        let state = self.state.read();
-        state.memtable.put(key, value)?;
-        self.try_freeze(state)?;
+        let approximate_size: usize;
+        {
+            let state = self.state.read();
+            state.memtable.put(key, value)?;
+            approximate_size = state.memtable.approximate_size();
+        }
+        self.try_freeze(approximate_size)?;
         Ok(())
     }
 
     /// Remove a key from the storage by writing an empty value.
     pub fn delete(&self, key: &[u8]) -> Result<()> {
-        self.state.read().memtable.put(key, &[])
+        // self.state.read().memtable.put(key, &[])
+        // for delete, we shouldn't but still need to add the approximate_size because test logical.
+        let approximate_size: usize;
+        {
+            let state = self.state.read();
+            state.memtable.put(key, b"")?;
+            approximate_size = state.memtable.approximate_size();
+        }
+        self.try_freeze(approximate_size)?;
+        Ok(())
     }
 
     pub(crate) fn path_of_sst_static(path: impl AsRef<Path>, id: usize) -> PathBuf {

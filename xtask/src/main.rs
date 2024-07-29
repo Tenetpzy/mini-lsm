@@ -146,7 +146,7 @@ fn copy_test_case(test: CopyTestAction) -> Result<()> {
     cmd!("cp", src, target).run()?;
     let test_filename = "harness.rs";
     let src = format!("{}/{}", src_dir, test_filename);
-    let target = format!("{}/{}", target_dir, test_filename);
+    let target: String = format!("{}/{}", target_dir, test_filename);
     cmd!("cp", src, target).run()?;
     let mut test_file = Vec::new();
     for file in Path::new(&target_dir).read_dir()? {

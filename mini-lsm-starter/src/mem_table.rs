@@ -42,7 +42,7 @@ impl MemTable {
             map: SkipMap::new(),
             wal: None,
             id,
-            approximate_size: AtomicUsize::new(0)
+            approximate_size: AtomicUsize::new(0),
         }
     }
 
@@ -83,13 +83,12 @@ impl MemTable {
     /// In week 2, day 6, also flush the data to WAL.
     /// In week 3, day 5, modify the function to use the batch API.
     pub fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
-        let mut added_size: usize = 0;
-        if !value.is_empty() {
-            added_size = key.len() + value.len();
-        }
-        self.approximate_size.fetch_add(added_size, Ordering::Relaxed);
+        let added_size: usize = key.len() + value.len();
+        self.approximate_size
+            .fetch_add(added_size, Ordering::Relaxed);
 
-        self.map.insert(Bytes::copy_from_slice(key), Bytes::copy_from_slice(value));
+        self.map
+            .insert(Bytes::copy_from_slice(key), Bytes::copy_from_slice(value));
         Ok(())
     }
 
