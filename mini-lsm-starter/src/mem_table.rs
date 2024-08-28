@@ -20,7 +20,7 @@ use crate::wal::Wal;
 /// An initial implementation of memtable is part of week 1, day 1. It will be incrementally implemented in other
 /// chapters of week 1 and week 2.
 pub struct MemTable {
-    map: SkipMap<Bytes, Bytes>,
+    map: Arc<SkipMap<Bytes, Bytes>>,
     wal: Option<Wal>,
     id: usize,
     approximate_size: AtomicUsize,
@@ -39,7 +39,7 @@ impl MemTable {
     /// Create a new mem-table.
     pub fn create(id: usize) -> Self {
         MemTable {
-            map: SkipMap::new(),
+            map: Arc::new(SkipMap::new()),
             wal: None,
             id,
             approximate_size: AtomicUsize::new(0),
@@ -105,8 +105,14 @@ impl MemTable {
     }
 
     /// Get an iterator over a range of keys.
-    pub fn scan(&self, _lower: Bound<&[u8]>, _upper: Bound<&[u8]>) -> MemTableIterator {
-        unimplemented!()
+    pub fn scan(&self, lower: Bound<&[u8]>, upper: Bound<&[u8]>) -> MemTableIterator {
+        let mut iter = MemTableIteratorBuilder {
+            map: Arc::clone(&self.map),
+            iter_builder: | map | map.range((map_bound(lower), map_bound(upper))),
+            item: (Bytes::new(), Bytes::new())
+        }.build();
+        iter.next().unwrap();
+        iter
     }
 
     /// Flush the mem-table to SSTable. Implement in week 1 day 6.
@@ -148,22 +154,35 @@ pub struct MemTableIterator {
     item: (Bytes, Bytes),
 }
 
+use crossbeam_skiplist::map::Entry;
+impl MemTableIterator {
+    fn iter_entry_to_item(entry: Option<Entry<Bytes, Bytes>>) -> (Bytes, Bytes) {
+        match entry {
+            Some(entry) => (entry.key().clone(), entry.value().clone()),
+            None => (Bytes::new(), Bytes::new())
+        }
+    }
+}
+
 impl StorageIterator for MemTableIterator {
     type KeyType<'a> = KeySlice<'a>;
 
     fn value(&self) -> &[u8] {
-        unimplemented!()
+        self.with_item(|item| item.1.as_ref())
     }
 
     fn key(&self) -> KeySlice {
-        unimplemented!()
+        self.with_item(|item| KeySlice::from_slice(item.0.as_ref()))
     }
 
     fn is_valid(&self) -> bool {
-        unimplemented!()
+        !self.borrow_item().0.is_empty()
     }
 
     fn next(&mut self) -> Result<()> {
-        unimplemented!()
+        self.with_mut(|fields| {
+            *fields.item = Self::iter_entry_to_item(fields.iter.next());
+            Ok(())
+        })
     }
 }
