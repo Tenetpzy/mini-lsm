@@ -80,11 +80,8 @@ impl<I: 'static + for<'a> StorageIterator<KeyType<'a> = KeySlice<'a>>> StorageIt
     fn next(&mut self) -> Result<()> {
         // 先移除当前堆顶，rust引用机制不允许在获得堆顶可变引用的同时修改堆中其它元素
         if let Some(mut cur_iter) = self.iters.pop() {
-
             // step1: 将每一个迭代器中与当前top迭代器的key相同的元素移除（只返回最新的key）
             while let Some(mut top) = self.iters.peek_mut() {
-                
-                // note: 
                 if top.1.key() == cur_iter.1.key() {
                     // 如果迭代器next导致内部出错
                     // 直接移除该迭代器并返回错误，否则peekmut调整堆时会继续访问迭代器导致panic
@@ -96,6 +93,8 @@ impl<I: 'static + for<'a> StorageIterator<KeyType<'a> = KeySlice<'a>>> StorageIt
                     else if !top.1.is_valid() {
                         PeekMut::pop(top);
                     }
+                } else {
+                    break;
                 }
             }
 

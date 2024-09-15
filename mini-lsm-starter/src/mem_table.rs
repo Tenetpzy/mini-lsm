@@ -106,11 +106,12 @@ impl MemTable {
 
     /// Get an iterator over a range of keys.
     pub fn scan(&self, lower: Bound<&[u8]>, upper: Bound<&[u8]>) -> MemTableIterator {
-        let mut iter = MemTableIteratorBuilder {
+        let mut iter: MemTableIterator = MemTableIteratorBuilder {
             map: Arc::clone(&self.map),
-            iter_builder: | map | map.range((map_bound(lower), map_bound(upper))),
-            item: (Bytes::new(), Bytes::new())
-        }.build();
+            iter_builder: |map| map.range((map_bound(lower), map_bound(upper))),
+            item: (Bytes::new(), Bytes::new()),
+        }
+        .build();
         iter.next().unwrap();
         iter
     }
@@ -159,7 +160,7 @@ impl MemTableIterator {
     fn iter_entry_to_item(entry: Option<Entry<Bytes, Bytes>>) -> (Bytes, Bytes) {
         match entry {
             Some(entry) => (entry.key().clone(), entry.value().clone()),
-            None => (Bytes::new(), Bytes::new())
+            None => (Bytes::new(), Bytes::new()),
         }
     }
 }
