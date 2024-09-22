@@ -282,7 +282,7 @@ impl LsmStorageInner {
     pub fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
         // false delete resulting the value's length equals 0.
         let return_value = |value: Bytes| {
-            if value.len() > 0 {
+            if !value.is_empty() {
                 Ok(Some(value))
             } else {
                 Ok(None)
@@ -409,6 +409,6 @@ impl LsmStorageInner {
             iters.push(Box::new(imm_tables.scan(lower, upper)));
         }
 
-        LsmIterator::new(MergeIterator::create(iters)).map(|iter| FusedIterator::new(iter))
+        LsmIterator::new(MergeIterator::create(iters)).map(FusedIterator::new)
     }
 }
