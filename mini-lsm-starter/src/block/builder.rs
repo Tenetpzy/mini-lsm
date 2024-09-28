@@ -1,7 +1,7 @@
 #![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
 #![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
 
-use crate::key::KeySlice;
+use crate::key::{KeySlice, KeyVec};
 
 use super::Block;
 
@@ -14,7 +14,7 @@ pub struct BlockBuilder {
     /// The expected block size.
     block_size: usize,
     // /// The first key in the block
-    // first_key: KeyVec,
+    first_key: KeyVec
 }
 
 impl BlockBuilder {
@@ -24,7 +24,7 @@ impl BlockBuilder {
             offsets: Vec::new(),
             data: Vec::new(),
             block_size,
-            // first_key: KeyVec::new()
+            first_key: KeyVec::new()
         }
     }
 
@@ -46,6 +46,10 @@ impl BlockBuilder {
         if (self.current_size() + new_entry_extra_len > self.block_size) && !self.offsets.is_empty()
         {
             return false;
+        }
+
+        if self.first_key.is_empty() {
+            self.first_key.append(key.raw_ref());
         }
 
         let key_len = key_len as u16;
