@@ -5,6 +5,7 @@ pub(crate) mod bloom;
 mod builder;
 mod iterator;
 
+use std::cmp::Ordering;
 use std::fs::File;
 use std::io::{IoSlice, Write};
 use std::path::Path;
@@ -34,7 +35,9 @@ pub struct BlockMeta {
 impl BlockMeta {
     pub fn new(offset: usize, first_key: KeyBytes, last_key: KeyBytes) -> BlockMeta {
         Self {
-            offset, first_key, last_key
+            offset,
+            first_key,
+            last_key,
         }
     }
 
@@ -59,7 +62,7 @@ impl BlockMeta {
     pub fn decode_block_meta(mut buf: impl Buf) -> Vec<BlockMeta> {
         let cnt = buf.get_u64_le();
         let mut res: Vec<BlockMeta> = Vec::new();
-        
+
         for _ in 0..cnt {
             let offset = buf.get_u64_le();
             let first_key_len = buf.get_u64_le();
@@ -95,12 +98,18 @@ impl FileObject {
     /// Create a new file object (day 2) and write the file to the disk (day 4).
     pub fn create(path: &Path, datas: &[IoSlice]) -> Result<Self> {
         let mut file = File::create(path)?;
-        file.write_vectored(datas)?;
+
+        let data_len: usize = datas.iter().map(|slice| slice.len()).sum();
+        let write_len = file.write_vectored(datas)?;
+        if write_len != data_len {
+            return Err(anyhow!("partial write SST file"));
+        }
+
         file.sync_all()?;
         let len = file.metadata()?.len();
         Ok(FileObject(
             Some(File::options().read(true).write(false).open(path)?),
-            len
+            len,
         ))
     }
 
@@ -136,21 +145,45 @@ impl SsTable {
 
     /// Open SSTable from a file.
     pub fn open(id: usize, block_cache: Option<Arc<BlockCache>>, file: FileObject) -> Result<Self> {
-        
+        let block_meta_offset = Self::decode_block_meta_offset(&file)?;
+        let block_meta_len = file.size() as usize - 4 - block_meta_offset;
+        let buf = file.read(block_meta_offset as u64, block_meta_len as u64)?;
+
+        let block_meta = BlockMeta::decode_block_meta(&buf[..]);
+        Ok(Self::new(
+            file,
+            block_meta,
+            block_meta_offset,
+            id,
+            block_cache,
+        ))
     }
 
-    pub fn create(
+    /// Also used in SsTableBuilder:build, avoid repeatly decoding blockmeta from file.
+    pub(crate) fn new(
         file: FileObject,
         block_meta: Vec<BlockMeta>,
         block_meta_offset: usize,
         id: usize,
         block_cache: Option<Arc<BlockCache>>,
-        first_key: KeyBytes,
-        last_key: KeyBytes,
-        bloom: Option<Bloom>,
-        max_ts: u64
     ) -> Self {
-        Self { file, block_meta, block_meta_offset, id, block_cache, first_key, last_key, bloom, max_ts }
+        let first_key = block_meta
+            .first()
+            .map_or(KeyBytes::default(), |meta| meta.first_key.clone());
+        let last_key = block_meta
+            .last()
+            .map_or(KeyBytes::default(), |meta| meta.last_key.clone());
+        Self {
+            file,
+            block_meta,
+            block_meta_offset,
+            id,
+            block_cache,
+            first_key,
+            last_key,
+            bloom: None,
+            max_ts: 0,
+        }
     }
 
     /// Create a mock SST with only first key + last key metadata
@@ -175,19 +208,53 @@ impl SsTable {
 
     /// Read a block from the disk.
     pub fn read_block(&self, block_idx: usize) -> Result<Arc<Block>> {
-        unimplemented!()
+        if block_idx >= self.block_meta.len() {
+            return Err(anyhow!("block index {block_idx} out of range"));
+        }
+
+        // block meta中没有记录block的大小或尾偏移，这里计算出来
+        let block_end = if block_idx == self.block_meta.len() - 1 {
+            self.block_meta_offset
+        } else {
+            self.block_meta[block_idx + 1].offset
+        };
+        let block_start = self.block_meta[block_idx].offset;
+        assert!(block_end >= block_start);
+        let block_len = block_end - block_start;
+
+        let block = self.file.read(block_start as u64, block_len as u64)?;
+        let block = Arc::new(Block::decode(&block));
+        Ok(block)
     }
 
     /// Read a block from disk, with block cache. (Day 4)
     pub fn read_block_cached(&self, block_idx: usize) -> Result<Arc<Block>> {
-        unimplemented!()
+        self.block_cache
+            .as_ref()
+            .map_or(self.read_block(block_idx), |cache| {
+                cache
+                    .try_get_with((self.sst_id(), block_idx), || self.read_block(block_idx))
+                    .map_err(|err| anyhow!(err))
+            })
     }
 
     /// Find the block that may contain `key`.
     /// Note: You may want to make use of the `first_key` stored in `BlockMeta`.
     /// You may also assume the key-value pairs stored in each consecutive block are sorted.
+    ///
+    /// 返回的block idx，要么是end，要么是SST中第一个满足key值 >= 参数key的键所在块
     pub fn find_block_idx(&self, key: KeySlice) -> usize {
-        unimplemented!()
+        match self.block_meta.binary_search_by(|meta| {
+            if key < meta.first_key.as_key_slice() {
+                Ordering::Greater
+            } else if key > meta.last_key.as_key_slice() {
+                Ordering::Less
+            } else {
+                Ordering::Equal
+            }
+        }) {
+            Ok(idx) | Err(idx) => idx,
+        }
     }
 
     /// Get number of data blocks.
@@ -215,9 +282,9 @@ impl SsTable {
         self.max_ts
     }
 
-    fn decode_block_meta_offset(&self) -> Result<usize> {
-        let encode_offset: [u8; 4] = 
-            self.file.read(self.file.size() - 4, 4)?
+    fn decode_block_meta_offset(file: &FileObject) -> Result<usize> {
+        let encode_offset: [u8; 4] = file
+            .read(file.size() - 4, 4)?
             .try_into()
             .map_err(|_| anyhow!("failed to transfer encode_offset: Vec<u8> -> [u8; 4]"))?;
 

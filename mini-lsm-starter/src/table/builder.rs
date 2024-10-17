@@ -1,15 +1,19 @@
 #![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
 #![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
 
-use std::{io::IoSlice, path::Path};
 use std::sync::Arc;
+use std::{io::IoSlice, path::Path};
 
 use anyhow::Result;
 use bytes::Bytes;
 
 use super::{BlockMeta, SsTable};
 use crate::table::FileObject;
-use crate::{block::BlockBuilder, key::{KeyBytes, KeySlice}, lsm_storage::BlockCache};
+use crate::{
+    block::BlockBuilder,
+    key::{KeyBytes, KeySlice},
+    lsm_storage::BlockCache,
+};
 
 /// Builds an SSTable from key-value pairs.
 pub struct SsTableBuilder {
@@ -30,7 +34,7 @@ impl SsTableBuilder {
             last_key: Bytes::new(),
             data: Vec::with_capacity(256 * 1024 * 1024),
             meta: Vec::new(),
-            block_size
+            block_size,
         }
     }
 
@@ -41,8 +45,10 @@ impl SsTableBuilder {
     pub fn add(&mut self, key: KeySlice, value: &[u8]) {
         if !self.builder.add(key, value) {
             self.encode_current_block_builder();
+            let res = self.builder.add(key, value);
+            assert!(res);
         }
-        
+
         if self.first_key.is_empty() {
             self.first_key = Bytes::copy_from_slice(key.raw_ref());
         }
@@ -71,20 +77,32 @@ impl SsTableBuilder {
         let mut encoded_meta_sec = Vec::<u8>::new();
         BlockMeta::encode_block_meta(&self.meta, &mut encoded_meta_sec);
 
-        let file_object = FileObject::create(path.as_ref(), 
-            &[IoSlice::new(&self.data), IoSlice::new(&encoded_meta_sec), 
-            IoSlice::new(&encoded_meta_sec_off)])?;
+        let file_object = FileObject::create(
+            path.as_ref(),
+            &[
+                IoSlice::new(&self.data),
+                IoSlice::new(&encoded_meta_sec),
+                IoSlice::new(&encoded_meta_sec_off),
+            ],
+        )?;
 
-        let first_key = self.meta.first().map_or(KeyBytes::default(), |meta| meta.first_key.clone());
-        let last_key = self.meta.first().map_or(KeyBytes::default(), |meta| meta.last_key.clone());
-        
-        Ok(SsTable::create(file_object, self.meta, meta_sec_off, id, block_cache, first_key, last_key, None, 0))
+        Ok(SsTable::new(
+            file_object,
+            self.meta,
+            meta_sec_off,
+            id,
+            block_cache,
+        ))
     }
 
     fn encode_current_block_builder(&mut self) {
         if !self.builder.is_empty() {
             let builder = std::mem::replace(&mut self.builder, BlockBuilder::new(self.block_size));
-            let meta = BlockMeta::new(self.data.len(), KeyBytes::from_bytes(self.first_key.clone()), KeyBytes::from_bytes(self.last_key.clone()));
+            let meta = BlockMeta::new(
+                self.data.len(),
+                KeyBytes::from_bytes(self.first_key.clone()),
+                KeyBytes::from_bytes(self.last_key.clone()),
+            );
 
             self.data.extend(builder.build().encode());
             self.meta.push(meta);

@@ -14,7 +14,7 @@ pub struct BlockBuilder {
     /// The expected block size.
     block_size: usize,
     // /// The first key in the block
-    first_key: KeyVec
+    first_key: KeyVec,
 }
 
 impl BlockBuilder {
@@ -24,7 +24,7 @@ impl BlockBuilder {
             offsets: Vec::new(),
             data: Vec::new(),
             block_size,
-            first_key: KeyVec::new()
+            first_key: KeyVec::new(),
         }
     }
 
