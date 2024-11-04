@@ -1,12 +1,13 @@
-#![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
-#![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
-
-use std::sync::Arc;
+use std::{ops::Bound, sync::Arc};
 
 use anyhow::Result;
 
 use super::SsTable;
-use crate::{block::BlockIterator, iterators::StorageIterator, key::KeySlice};
+use crate::{
+    block::BlockIterator,
+    iterators::StorageIterator,
+    key::{KeyBytes, KeySlice},
+};
 
 /// An iterator over the contents of an SSTable.
 pub struct SsTableIterator {
@@ -105,6 +106,86 @@ impl StorageIterator for SsTableIterator {
             None => (),
         }
 
+        Ok(())
+    }
+}
+
+pub struct SSTRangeIterator {
+    iter: SsTableIterator,
+    lower: Bound<KeyBytes>,
+    upper: Bound<KeyBytes>,
+    valid: bool,
+}
+
+impl SSTRangeIterator {
+    pub fn create(
+        table: Arc<SsTable>,
+        lower: Bound<KeyBytes>,
+        upper: Bound<KeyBytes>,
+    ) -> Result<Self> {
+        let mut iter = match &lower {
+            Bound::Included(key) | Bound::Excluded(key) => {
+                SsTableIterator::create_and_seek_to_key(table, key.as_key_slice())?
+            }
+            Bound::Unbounded => SsTableIterator::create_and_seek_to_first(table)?,
+        };
+        if let Bound::Excluded(key) = &lower {
+            if iter.is_valid() && iter.key() == key.as_key_slice() {
+                iter.next()?;
+            }
+        }
+
+        let mut range_iter = Self {
+            iter,
+            lower,
+            upper,
+            valid: true,
+        };
+        range_iter.validate_upper_bound();
+        Ok(range_iter)
+    }
+
+    // 检查当前是否超过了upper，如果是，置valid为false
+    fn validate_upper_bound(&mut self) {
+        if !self.iter.is_valid() || !self.valid {
+            self.valid = false;
+            return;
+        }
+
+        match &self.upper {
+            Bound::Included(key) => {
+                if self.iter.key() > key.as_key_slice() {
+                    self.valid = false;
+                }
+            }
+            Bound::Excluded(key) => {
+                if self.iter.key() >= key.as_key_slice() {
+                    self.valid = false;
+                }
+            }
+            Bound::Unbounded => {}
+        }
+    }
+}
+
+impl StorageIterator for SSTRangeIterator {
+    type KeyType<'a> = <SsTableIterator as StorageIterator>::KeyType<'a>;
+
+    fn value(&self) -> &[u8] {
+        self.iter.value()
+    }
+
+    fn key(&self) -> Self::KeyType<'_> {
+        self.iter.key()
+    }
+
+    fn is_valid(&self) -> bool {
+        self.valid
+    }
+
+    fn next(&mut self) -> Result<()> {
+        self.iter.next()?;
+        self.validate_upper_bound();
         Ok(())
     }
 }

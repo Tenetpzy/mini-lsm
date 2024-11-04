@@ -14,6 +14,7 @@ use std::sync::Arc;
 use anyhow::{anyhow, Result};
 pub use builder::SsTableBuilder;
 use bytes::Buf;
+pub use iterator::SSTRangeIterator;
 pub use iterator::SsTableIterator;
 
 use crate::block::Block;

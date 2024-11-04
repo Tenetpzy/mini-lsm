@@ -11,7 +11,7 @@ use crossbeam_skiplist::SkipMap;
 use ouroboros::self_referencing;
 
 use crate::iterators::StorageIterator;
-use crate::key::KeySlice;
+use crate::key::{KeyBytes, KeySlice};
 use crate::table::SsTableBuilder;
 use crate::wal::Wal;
 
@@ -31,6 +31,14 @@ pub(crate) fn map_bound(bound: Bound<&[u8]>) -> Bound<Bytes> {
     match bound {
         Bound::Included(x) => Bound::Included(Bytes::copy_from_slice(x)),
         Bound::Excluded(x) => Bound::Excluded(Bytes::copy_from_slice(x)),
+        Bound::Unbounded => Bound::Unbounded,
+    }
+}
+
+pub(crate) fn map_bound_keybytes(bound: Bound<&[u8]>) -> Bound<KeyBytes> {
+    match bound {
+        Bound::Included(x) => Bound::Included(KeyBytes::from_bytes(Bytes::copy_from_slice(x))),
+        Bound::Excluded(x) => Bound::Excluded(KeyBytes::from_bytes(Bytes::copy_from_slice(x))),
         Bound::Unbounded => Bound::Unbounded,
     }
 }
