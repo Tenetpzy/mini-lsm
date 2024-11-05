@@ -8,6 +8,7 @@ mod iterator;
 use std::cmp::Ordering;
 use std::fs::File;
 use std::io::{IoSlice, Write};
+use std::ops::Bound;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -290,5 +291,26 @@ impl SsTable {
             .map_err(|_| anyhow!("failed to transfer encode_offset: Vec<u8> -> [u8; 4]"))?;
 
         Ok(u32::from_le_bytes(encode_offset) as usize)
+    }
+
+    /// 检查key是否在本sst的[first_key, last_key]之间，是返回true
+    pub(crate) fn key_within(&self, key: KeySlice) -> bool {
+        key >= self.first_key.as_key_slice() && key <= self.last_key.as_key_slice()
+    }
+
+    /// 检查[start, end]是否与本sst的[first_key, last_key]有交叠，有返回true
+    pub(crate) fn range_overlap(&self, start: Bound<&[u8]>, end: Bound<&[u8]>) -> bool {
+        let on_right = match start {
+            Bound::Included(start) => start > self.last_key.raw_ref(),
+            Bound::Excluded(start) => start >= self.last_key.raw_ref(),
+            Bound::Unbounded => false,
+        };
+        let on_left = match end {
+            Bound::Included(end) => end < self.first_key.raw_ref(),
+            Bound::Excluded(end) => end <= self.first_key.raw_ref(),
+            Bound::Unbounded => false,
+        };
+
+        !(on_left || on_right)
     }
 }

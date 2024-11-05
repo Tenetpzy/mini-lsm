@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 
-use anyhow::{Ok, Result};
+use anyhow::{anyhow, Context, Ok, Result};
 use bytes::Bytes;
 use parking_lot::{Mutex, MutexGuard, RwLock};
 
@@ -23,7 +23,7 @@ use crate::lsm_iterator::{FusedIterator, LsmIterator};
 use crate::manifest::Manifest;
 use crate::mem_table::{map_bound_keybytes, MemTable, MemTableIterator};
 use crate::mvcc::LsmMvccInner;
-use crate::table::{SSTRangeIterator, SsTable, SsTableIterator};
+use crate::table::{SSTRangeIterator, SsTable, SsTableBuilder, SsTableIterator};
 
 pub type BlockCache = moka::sync::Cache<(usize, usize), Arc<Block>>;
 
@@ -158,7 +158,21 @@ impl Drop for MiniLsm {
 
 impl MiniLsm {
     pub fn close(&self) -> Result<()> {
-        unimplemented!()
+        let mut flush_thread_guard = self.flush_thread.lock();
+        let flush_thread = flush_thread_guard.take();
+        if let Some(flush_thread) = flush_thread {
+            self.flush_notifier.send(())?;
+            flush_thread.join().unwrap();
+        }
+
+        let mut compaction_thread_guard = self.compaction_thread.lock();
+        let compaction_thread = compaction_thread_guard.take();
+        if let Some(compaction_thread) = compaction_thread {
+            self.compaction_notifier.send(())?;
+            compaction_thread.join().unwrap();
+        }
+
+        Ok(())
     }
 
     /// Start the storage engine by either loading an existing directory or creating a new one if the directory does
@@ -234,7 +248,7 @@ impl MiniLsm {
 impl LsmStorageInner {
     pub(crate) fn next_sst_id(&self) -> usize {
         self.next_sst_id
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Start the storage engine by either loading an existing directory or creating a new one if the directory does
@@ -255,6 +269,10 @@ impl LsmStorageInner {
             ),
             CompactionOptions::NoCompaction => CompactionController::NoCompaction,
         };
+
+        if !path.exists() {
+            std::fs::create_dir_all(path).context("failed to create DB dir")?;
+        }
 
         let storage = Self {
             state: Arc::new(RwLock::new(Arc::new(state))),
@@ -310,12 +328,15 @@ impl LsmStorageInner {
 
         for sst_id in &snapshot.l0_sstables {
             let sst = snapshot.sstables.get(sst_id).unwrap();
+            let key = KeySlice::from_slice(key);
 
-            let iter =
-                SsTableIterator::create_and_seek_to_key(sst.clone(), KeySlice::from_slice(key))?;
+            if sst.key_within(key) {
+                let iter = SsTableIterator::create_and_seek_to_key(sst.clone(), key)?;
 
-            if iter.is_valid() && iter.key() == KeySlice::from_slice(key) {
-                return return_value(Bytes::copy_from_slice(iter.value()));
+                // 性能有问题！需要拷贝value值到新的Bytes中
+                if iter.is_valid() && iter.key() == key {
+                    return return_value(Bytes::copy_from_slice(iter.value()));
+                }
             }
         }
 
@@ -407,7 +428,33 @@ impl LsmStorageInner {
 
     /// Force flush the earliest-created immutable memtable to disk
     pub fn force_flush_next_imm_memtable(&self) -> Result<()> {
-        unimplemented!()
+        let _guard = self.state_lock.lock();
+
+        let target_imm_memtable = {
+            let state = self.state.read();
+            state.imm_memtables.last().map(Arc::clone)
+        }
+        .ok_or(anyhow!("unexpected empty immtable list"))?;
+
+        let mut sst_builder = SsTableBuilder::new(self.options.block_size);
+        target_imm_memtable.flush(&mut sst_builder)?;
+        let sst_id = target_imm_memtable.id();
+        let sst = sst_builder.build(
+            sst_id,
+            Some(self.block_cache.clone()),
+            self.path_of_sst(sst_id),
+        )?;
+
+        {
+            let mut state = self.state.write();
+            let mut snapshot = state.as_ref().clone();
+            snapshot.imm_memtables.pop();
+            snapshot.l0_sstables.insert(0, sst_id);
+            snapshot.sstables.insert(sst_id, Arc::new(sst));
+            *state = Arc::new(snapshot);
+        }
+
+        Ok(())
     }
 
     pub fn new_txn(&self) -> Result<()> {
@@ -436,12 +483,14 @@ impl LsmStorageInner {
         for sst_idx in &snapshot.l0_sstables {
             let sst = snapshot.sstables.get(sst_idx).unwrap();
 
-            let iter = SSTRangeIterator::create(
-                Arc::clone(sst),
-                map_bound_keybytes(lower),
-                map_bound_keybytes(upper),
-            )?;
-            sst_iters.push(Box::new(iter));
+            if sst.range_overlap(lower, upper) {
+                let iter = SSTRangeIterator::create(
+                    Arc::clone(sst),
+                    map_bound_keybytes(lower),
+                    map_bound_keybytes(upper),
+                )?;
+                sst_iters.push(Box::new(iter));
+            }
         }
 
         let iter = TwoMergeIterator::create(
