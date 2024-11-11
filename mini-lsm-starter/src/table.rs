@@ -122,14 +122,23 @@ impl FileObject {
     }
 }
 
+#[derive(Default)]
+pub(crate) struct SsTMetaInfo {
+    block_meta_offset: u64,
+    block_meta_len: u64,
+    bloom_filter_offset: u64,
+    bloom_filter_len: u64,
+    block_section_end_offset: u64, // 数据区域的尾后偏移
+}
+
 /// An SSTable.
+/// SST structure: reference to tutorial 1.7
 pub struct SsTable {
     /// The actual storage unit of SsTable, the format is as above.
     pub(crate) file: FileObject,
     /// The meta blocks that hold info for data blocks.
     pub(crate) block_meta: Vec<BlockMeta>,
-    /// The offset that indicates the start point of meta blocks in `file`.
-    pub(crate) block_meta_offset: usize,
+    meta_info: SsTMetaInfo,
     id: usize,
     block_cache: Option<Arc<BlockCache>>,
     first_key: KeyBytes,
@@ -147,27 +156,34 @@ impl SsTable {
 
     /// Open SSTable from a file.
     pub fn open(id: usize, block_cache: Option<Arc<BlockCache>>, file: FileObject) -> Result<Self> {
-        let block_meta_offset = Self::decode_block_meta_offset(&file)?;
-        let block_meta_len = file.size() as usize - 4 - block_meta_offset;
-        let buf = file.read(block_meta_offset as u64, block_meta_len as u64)?;
+        let meta_info = Self::decode_meta_info(&file)?;
 
-        let block_meta = BlockMeta::decode_block_meta(&buf[..]);
+        let block_meta_buf = file.read(meta_info.block_meta_offset, meta_info.block_meta_len)?;
+        let block_meta = BlockMeta::decode_block_meta(&block_meta_buf[..]);
+
+        let bloom_buf = file.read(meta_info.bloom_filter_offset, meta_info.bloom_filter_len)?;
+        let bloom = Bloom::decode(&bloom_buf)?;
+
         Ok(Self::new(
             file,
             block_meta,
-            block_meta_offset,
+            meta_info,
             id,
             block_cache,
+            Some(bloom),
+            0,
         ))
     }
 
-    /// Also used in SsTableBuilder:build, avoid repeatly decoding blockmeta from file.
+    /// Also used in SsTableBuilder:build, avoid repeatly decoding meta from file.
     pub(crate) fn new(
         file: FileObject,
         block_meta: Vec<BlockMeta>,
-        block_meta_offset: usize,
+        meta_info: SsTMetaInfo,
         id: usize,
         block_cache: Option<Arc<BlockCache>>,
+        bloom: Option<Bloom>,
+        max_ts: u64,
     ) -> Self {
         let first_key = block_meta
             .first()
@@ -178,13 +194,13 @@ impl SsTable {
         Self {
             file,
             block_meta,
-            block_meta_offset,
+            meta_info,
             id,
             block_cache,
             first_key,
             last_key,
-            bloom: None,
-            max_ts: 0,
+            bloom,
+            max_ts,
         }
     }
 
@@ -198,7 +214,7 @@ impl SsTable {
         Self {
             file: FileObject(None, file_size),
             block_meta: vec![],
-            block_meta_offset: 0,
+            meta_info: SsTMetaInfo::default(),
             id,
             block_cache: None,
             first_key,
@@ -216,7 +232,7 @@ impl SsTable {
 
         // block meta中没有记录block的大小或尾偏移，这里计算出来
         let block_end = if block_idx == self.block_meta.len() - 1 {
-            self.block_meta_offset
+            self.meta_info.block_section_end_offset as usize
         } else {
             self.block_meta[block_idx + 1].offset
         };
@@ -284,13 +300,28 @@ impl SsTable {
         self.max_ts
     }
 
-    fn decode_block_meta_offset(file: &FileObject) -> Result<usize> {
-        let encode_offset: [u8; 4] = file
+    fn decode_meta_info(file: &FileObject) -> Result<SsTMetaInfo> {
+        let encode_bloom_offset: [u8; 4] = file
             .read(file.size() - 4, 4)?
             .try_into()
-            .map_err(|_| anyhow!("failed to transfer encode_offset: Vec<u8> -> [u8; 4]"))?;
+            .map_err(|_| anyhow!("failed to transfer bloom offset: Vec<u8> -> [u8; 4]"))?;
+        let bloom_filter_offset = u32::from_le_bytes(encode_bloom_offset) as u64;
+        let bloom_filter_len = file.size() - 4 - bloom_filter_offset;
 
-        Ok(u32::from_le_bytes(encode_offset) as usize)
+        let encode_meta_offset: [u8; 4] = file
+            .read(bloom_filter_offset - 4, 4)?
+            .try_into()
+            .map_err(|_| anyhow!("failed to transfer meta offset: Vec<u8> -> [u8; 4]"))?;
+        let block_meta_offset = u32::from_le_bytes(encode_meta_offset) as u64;
+        let block_meta_len = bloom_filter_offset - 4 - block_meta_offset;
+
+        Ok(SsTMetaInfo {
+            block_meta_offset,
+            block_meta_len,
+            bloom_filter_offset,
+            bloom_filter_len,
+            block_section_end_offset: block_meta_offset,
+        })
     }
 
     /// 检查key是否在本sst的[first_key, last_key]之间，是返回true
@@ -312,5 +343,9 @@ impl SsTable {
         };
 
         !(on_left || on_right)
+    }
+
+    pub fn key_hash(key: &[u8]) -> u32 {
+        farmhash::fingerprint32(key)
     }
 }

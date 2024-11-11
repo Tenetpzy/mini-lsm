@@ -331,6 +331,13 @@ impl LsmStorageInner {
             let key = KeySlice::from_slice(key);
 
             if sst.key_within(key) {
+                // key在范围内，再用布隆过滤器过一遍
+                if let Some(bloom) = &sst.bloom {
+                    if !bloom.may_contain(SsTable::key_hash(key.raw_ref())) {
+                        continue;
+                    }
+                }
+
                 let iter = SsTableIterator::create_and_seek_to_key(sst.clone(), key)?;
 
                 // 性能有问题！需要拷贝value值到新的Bytes中
