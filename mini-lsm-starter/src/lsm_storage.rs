@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 
-use anyhow::{anyhow, Context, Ok, Result};
+use anyhow::{Context, Ok, Result};
 use bytes::Bytes;
 use parking_lot::{Mutex, MutexGuard, RwLock};
 
@@ -302,7 +302,7 @@ impl LsmStorageInner {
     /// Get a key from the storage. In day 7, this can be further optimized by using a bloom filter.
     pub fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
         // false delete resulting the value's length equals 0.
-        let return_value = |value: Bytes| {
+        let get_value_if_not_deleted = |value: Bytes| {
             if !value.is_empty() {
                 Ok(Some(value))
             } else {
@@ -315,11 +315,11 @@ impl LsmStorageInner {
             Arc::clone(&state)
         };
         match snapshot.memtable.get(key) {
-            Some(value) => return return_value(value),
+            Some(value) => return get_value_if_not_deleted(value),
             None => {
                 for imm_table in &snapshot.imm_memtables {
                     match imm_table.get(key) {
-                        Some(value) => return return_value(value),
+                        Some(value) => return get_value_if_not_deleted(value),
                         None => continue,
                     }
                 }
@@ -342,7 +342,7 @@ impl LsmStorageInner {
 
                 // 性能有问题！需要拷贝value值到新的Bytes中
                 if iter.is_valid() && iter.key() == key {
-                    return return_value(Bytes::copy_from_slice(iter.value()));
+                    return get_value_if_not_deleted(Bytes::copy_from_slice(iter.value()));
                 }
             }
         }
@@ -439,9 +439,11 @@ impl LsmStorageInner {
 
         let target_imm_memtable = {
             let state = self.state.read();
-            state.imm_memtables.last().map(Arc::clone)
-        }
-        .ok_or(anyhow!("unexpected empty immtable list"))?;
+            match state.imm_memtables.last().map(Arc::clone) {
+                Some(imm_table) => imm_table,
+                None => return Ok(()),  // 可能因为用户也主动进行了flush，所以没有immtable不算错误
+            }
+        };
 
         let mut sst_builder = SsTableBuilder::new(self.options.block_size);
         target_imm_memtable.flush(&mut sst_builder)?;

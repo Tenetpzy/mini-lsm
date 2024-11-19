@@ -10,7 +10,7 @@ pub struct BlockBuilder {
     data: Vec<u8>,
     /// The expected block size.
     block_size: usize,
-    // /// The first key in the block
+    /// The first key in the block
     first_key: KeyVec,
 }
 

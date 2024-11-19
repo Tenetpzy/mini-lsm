@@ -17,7 +17,7 @@ pub struct BlockIterator {
     value_range: (usize, usize),
     /// Current index of the key-value pair, should be in range of [0, num_of_elements)
     idx: usize,
-    // /// The first key in the block
+    /// The first key in the block
     first_key: KeyVec,
 }
 
