@@ -1,6 +1,3 @@
-#![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
-#![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
-
 pub(crate) mod bloom;
 mod builder;
 mod iterator;
@@ -324,12 +321,24 @@ impl SsTable {
         })
     }
 
-    /// 检查key是否在本sst的[first_key, last_key]之间，是返回true
+    /// 检查key是否在本sst的`[first_key, last_key]`之间，是返回true
     pub(crate) fn key_within(&self, key: KeySlice) -> bool {
         key >= self.first_key.as_key_slice() && key <= self.last_key.as_key_slice()
     }
 
-    /// 检查[start, end]是否与本sst的[first_key, last_key]有交叠，有返回true
+    /// 检查本SST的`[first_key, last_key]`和参数key的大小关系  
+    /// `first_key > key`为greater, `last_key < key`为less, `first_key <= key <= last_key`为equal
+    pub(crate) fn cmp_range_with_key(&self, key: KeySlice) -> Ordering {
+        if self.first_key.as_key_slice() > key {
+            Ordering::Greater
+        } else if self.last_key.as_key_slice() < key {
+            Ordering::Less
+        } else {
+            Ordering::Equal
+        }
+    }
+
+    /// 检查[start, end]是否与本sst的`[first_key, last_key]`有交叠，有返回true
     pub(crate) fn range_overlap(&self, start: Bound<&[u8]>, end: Bound<&[u8]>) -> bool {
         let on_right = match start {
             Bound::Included(start) => start > self.last_key.raw_ref(),

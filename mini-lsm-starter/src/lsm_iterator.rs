@@ -2,15 +2,21 @@ use anyhow::{anyhow, Result};
 
 use crate::{
     iterators::{
-        merge_iterator::MergeIterator, two_merge_iterator::TwoMergeIterator, StorageIterator,
+        concat_iterator::SstConcatRangeIterator, merge_iterator::MergeIterator,
+        two_merge_iterator::TwoMergeIterator, StorageIterator,
     },
     mem_table::MemTableIterator,
     table::SSTRangeIterator,
 };
 
 /// Represents the internal type for an LSM iterator. This type will be changed across the tutorial for multiple times.
-type LsmIteratorInner =
-    TwoMergeIterator<MergeIterator<MemTableIterator>, MergeIterator<SSTRangeIterator>>;
+type LsmIteratorInner = TwoMergeIterator<
+    MergeIterator<MemTableIterator>, // memtable and immutable memtables
+    TwoMergeIterator<
+        MergeIterator<SSTRangeIterator>, // L0 SSTs
+        SstConcatRangeIterator,          // L1 SSTs
+    >,
+>;
 
 pub struct LsmIterator {
     inner: LsmIteratorInner,

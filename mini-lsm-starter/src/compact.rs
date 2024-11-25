@@ -1,13 +1,16 @@
 #![allow(dead_code)] // REMOVE THIS LINE after fully implementing this functionality
 
+mod full_compact;
 mod leveled;
 mod simple_leveled;
 mod tiered;
 
+use std::fs::remove_file;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
+use full_compact::FullCompactionTask;
 pub use leveled::{LeveledCompactionController, LeveledCompactionOptions, LeveledCompactionTask};
 use serde::{Deserialize, Serialize};
 pub use simple_leveled::{
@@ -15,18 +18,19 @@ pub use simple_leveled::{
 };
 pub use tiered::{TieredCompactionController, TieredCompactionOptions, TieredCompactionTask};
 
+use crate::iterators::concat_iterator::SstConcatIterator;
+use crate::iterators::merge_iterator::MergeIterator;
+use crate::iterators::two_merge_iterator::TwoMergeIterator;
+use crate::iterators::StorageIterator;
 use crate::lsm_storage::{LsmStorageInner, LsmStorageState};
-use crate::table::SsTable;
+use crate::table::{SsTable, SsTableBuilder, SsTableIterator};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum CompactionTask {
     Leveled(LeveledCompactionTask),
     Tiered(TieredCompactionTask),
     Simple(SimpleLeveledCompactionTask),
-    ForceFullCompaction {
-        l0_sstables: Vec<usize>,
-        l1_sstables: Vec<usize>,
-    },
+    ForceFullCompaction(FullCompactionTask),
 }
 
 impl CompactionTask {
@@ -108,12 +112,129 @@ pub enum CompactionOptions {
 }
 
 impl LsmStorageInner {
-    fn compact(&self, _task: &CompactionTask) -> Result<Vec<Arc<SsTable>>> {
-        unimplemented!()
+    fn compact(&self, task: &CompactionTask) -> Result<Vec<Arc<SsTable>>> {
+        let snapshot = {
+            let guard = self.state.read();
+            Arc::clone(&guard)
+        };
+
+        match task {
+            CompactionTask::ForceFullCompaction(task) => {
+                let mut l0_iters: Vec<Box<SsTableIterator>> = Vec::new();
+                for sst_id in &task.l0_sstables {
+                    let iter = SsTableIterator::create_and_seek_to_first(Arc::clone(
+                        snapshot.get_sst(*sst_id),
+                    ))?;
+                    l0_iters.push(Box::new(iter));
+                }
+                let merged_l0_iter = MergeIterator::create(l0_iters);
+
+                let l1_iter = SstConcatIterator::create_and_seek_to_first(
+                    task.l1_sstables
+                        .iter()
+                        .map(|sst_id| Arc::clone(snapshot.get_sst(*sst_id)))
+                        .collect(),
+                )?;
+
+                let mut iter = TwoMergeIterator::create(merged_l0_iter, l1_iter)?;
+                let mut builder = SsTableBuilder::new(self.options.block_size);
+                let mut result: Vec<Arc<SsTable>> = Vec::new();
+
+                while iter.is_valid() {
+                    if iter.value().is_empty() {
+                        // full compact中，被删除的键不需要出现在新的sorted run中
+                        iter.next()?;
+                        continue;
+                    }
+
+                    if builder.estimated_size() > self.options.target_sst_size {
+                        let sst = self.create_new_sst(builder)?;
+                        result.push(Arc::new(sst));
+                        builder = SsTableBuilder::new(self.options.block_size);
+                    }
+
+                    builder.add(iter.key(), iter.value());
+                    iter.next()?;
+                }
+
+                if builder.estimated_size() > 0 {
+                    let sst = self.create_new_sst(builder)?;
+                    result.push(Arc::new(sst));
+                }
+
+                Ok(result)
+            }
+            _ => unimplemented!(),
+        }
+    }
+
+    fn create_new_sst(&self, builder: SsTableBuilder) -> Result<SsTable> {
+        let sst_id = self.next_sst_id();
+        builder.build(
+            sst_id,
+            Some(Arc::clone(&self.block_cache)),
+            self.path_of_sst(sst_id),
+        )
     }
 
     pub fn force_full_compaction(&self) -> Result<()> {
-        unimplemented!()
+        let snapshot = {
+            let guard = self.state.read();
+            Arc::clone(&guard)
+        };
+
+        let compaction_task = CompactionTask::ForceFullCompaction(FullCompactionTask {
+            l0_sstables: snapshot.l0_sstables.clone(),
+            l1_sstables: snapshot.levels[0].1.clone(),
+        });
+
+        let new_sorted_run = self.compact(&compaction_task)?;
+
+        // 避免task拷贝，再match出来
+        let full_compaction_task = match compaction_task {
+            CompactionTask::ForceFullCompaction(task) => task,
+            _ => unreachable!(),
+        };
+
+        let compacted_sst_ids: Vec<usize> = full_compaction_task
+            .l0_sstables
+            .iter()
+            .chain(full_compaction_task.l1_sstables.iter())
+            .copied()
+            .collect();
+
+        {
+            let mut guard = self.state.write();
+            let mut state = guard.as_ref().clone();
+
+            // 在压实操作期间，可能有新的L0_flush发生，保留新的L0索引，去掉已经压实的
+            // 由于新的L0只可能在列表头插入，所以直接truncate
+            state
+                .l0_sstables
+                .truncate(state.l0_sstables.len() - full_compaction_task.l0_sstables.len());
+
+            // 清空L1索引
+            state.levels[0].1.clear();
+
+            for sst_id in &compacted_sst_ids {
+                state.sstables.remove(sst_id);
+            }
+
+            for sst in new_sorted_run {
+                let id = sst.sst_id();
+                state.levels[0].1.push(id);
+                state.sstables.insert(id, sst);
+            }
+
+            *guard = Arc::new(state);
+        }
+
+        // 删除旧SST文件
+        for sst_id in compacted_sst_ids {
+            remove_file(self.path_of_sst(sst_id))?;
+        }
+
+        Ok(())
     }
 
     fn trigger_compaction(&self) -> Result<()> {

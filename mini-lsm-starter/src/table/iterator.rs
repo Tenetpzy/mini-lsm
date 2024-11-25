@@ -7,6 +7,7 @@ use crate::{
     block::BlockIterator,
     iterators::StorageIterator,
     key::{KeyBytes, KeySlice},
+    mem_table::map_bound_keybytes,
 };
 
 /// An iterator over the contents of an SSTable.
@@ -112,33 +113,27 @@ impl StorageIterator for SsTableIterator {
 
 pub struct SSTRangeIterator {
     iter: SsTableIterator,
-    lower: Bound<KeyBytes>,
     upper: Bound<KeyBytes>,
     valid: bool,
 }
 
 impl SSTRangeIterator {
-    pub fn create(
-        table: Arc<SsTable>,
-        lower: Bound<KeyBytes>,
-        upper: Bound<KeyBytes>,
-    ) -> Result<Self> {
+    pub fn create(table: Arc<SsTable>, lower: Bound<&[u8]>, upper: Bound<&[u8]>) -> Result<Self> {
         let mut iter = match &lower {
             Bound::Included(key) | Bound::Excluded(key) => {
-                SsTableIterator::create_and_seek_to_key(table, key.as_key_slice())?
+                SsTableIterator::create_and_seek_to_key(table, KeySlice::from_slice(key))?
             }
             Bound::Unbounded => SsTableIterator::create_and_seek_to_first(table)?,
         };
         if let Bound::Excluded(key) = &lower {
-            if iter.is_valid() && iter.key() == key.as_key_slice() {
+            if iter.is_valid() && iter.key() == KeySlice::from_slice(key) {
                 iter.next()?;
             }
         }
 
         let mut range_iter = Self {
             iter,
-            lower,
-            upper,
+            upper: map_bound_keybytes(upper),
             valid: true,
         };
         range_iter.validate_upper_bound();

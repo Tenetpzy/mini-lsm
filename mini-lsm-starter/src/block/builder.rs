@@ -87,7 +87,7 @@ impl BlockBuilder {
         }
     }
 
-    fn current_size(&self) -> usize {
+    pub fn current_size(&self) -> usize {
         self.data.len() + self.offsets.len() * size_of::<u16>() + size_of::<u16>()
     }
 

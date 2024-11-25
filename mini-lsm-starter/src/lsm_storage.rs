@@ -15,13 +15,14 @@ use crate::compact::{
     CompactionController, CompactionOptions, LeveledCompactionController, LeveledCompactionOptions,
     SimpleLeveledCompactionController, SimpleLeveledCompactionOptions, TieredCompactionController,
 };
+use crate::iterators::concat_iterator::{SstConcatIterator, SstConcatRangeIterator};
 use crate::iterators::merge_iterator::MergeIterator;
 use crate::iterators::two_merge_iterator::TwoMergeIterator;
 use crate::iterators::StorageIterator;
 use crate::key::KeySlice;
 use crate::lsm_iterator::{FusedIterator, LsmIterator};
 use crate::manifest::Manifest;
-use crate::mem_table::{map_bound_keybytes, MemTable, MemTableIterator};
+use crate::mem_table::{MemTable, MemTableIterator};
 use crate::mvcc::LsmMvccInner;
 use crate::table::{SSTRangeIterator, SsTable, SsTableBuilder, SsTableIterator};
 
@@ -66,6 +67,10 @@ impl LsmStorageState {
             levels,
             sstables: Default::default(),
         }
+    }
+
+    pub(crate) fn get_sst(&self, sst_id: usize) -> &Arc<SsTable> {
+        self.sstables.get(&sst_id).unwrap()
     }
 }
 
@@ -326,9 +331,9 @@ impl LsmStorageInner {
             }
         };
 
+        let key = KeySlice::from_slice(key);
         for sst_id in &snapshot.l0_sstables {
-            let sst = snapshot.sstables.get(sst_id).unwrap();
-            let key = KeySlice::from_slice(key);
+            let sst = snapshot.get_sst(*sst_id);
 
             if sst.key_within(key) {
                 // key在范围内，再用布隆过滤器过一遍
@@ -344,6 +349,25 @@ impl LsmStorageInner {
                 if iter.is_valid() && iter.key() == key {
                     return get_value_if_not_deleted(Bytes::copy_from_slice(iter.value()));
                 }
+            }
+        }
+
+        if let CompactionOptions::NoCompaction = &self.options.compaction_options {
+            let mut l1_ssts: Vec<Arc<SsTable>> = Vec::new();
+            for sst_id in &snapshot.levels[0].1 {
+                let sst = snapshot.get_sst(*sst_id);
+
+                if sst.key_within(key) {
+                    if let Some(bloom) = &sst.bloom {
+                        if bloom.may_contain(SsTable::key_hash(key.raw_ref())) {
+                            l1_ssts.push(Arc::clone(sst));
+                        }
+                    }
+                }
+            }
+            let l1_iter = SstConcatIterator::create_and_seek_to_key(l1_ssts, key)?;
+            if l1_iter.is_valid() && l1_iter.key() == key {
+                return get_value_if_not_deleted(Bytes::copy_from_slice(l1_iter.value()));
             }
         }
 
@@ -441,7 +465,7 @@ impl LsmStorageInner {
             let state = self.state.read();
             match state.imm_memtables.last().map(Arc::clone) {
                 Some(imm_table) => imm_table,
-                None => return Ok(()),  // 可能因为用户也主动进行了flush，所以没有immtable不算错误
+                None => return Ok(()), // 可能因为用户也主动进行了flush，所以没有immtable不算错误
             }
         };
 
@@ -488,23 +512,27 @@ impl LsmStorageInner {
             mem_iters.push(Box::new(imm_tables.scan(lower, upper)));
         }
 
-        let mut sst_iters: Vec<Box<SSTRangeIterator>> = Vec::new();
+        let mut l0_sst_iters: Vec<Box<SSTRangeIterator>> = Vec::new();
         for sst_idx in &snapshot.l0_sstables {
-            let sst = snapshot.sstables.get(sst_idx).unwrap();
+            let sst = snapshot.get_sst(*sst_idx);
 
             if sst.range_overlap(lower, upper) {
-                let iter = SSTRangeIterator::create(
-                    Arc::clone(sst),
-                    map_bound_keybytes(lower),
-                    map_bound_keybytes(upper),
-                )?;
-                sst_iters.push(Box::new(iter));
+                let iter = SSTRangeIterator::create(Arc::clone(sst), lower, upper)?;
+                l0_sst_iters.push(Box::new(iter));
             }
         }
 
+        let mut l1_ssts: Vec<Arc<SsTable>> = Vec::new();
+        for sst_id in &snapshot.levels[0].1 {
+            let sst = snapshot.get_sst(*sst_id);
+            l1_ssts.push(Arc::clone(sst));
+        }
+
+        let l1_sst_iter = SstConcatRangeIterator::create(l1_ssts, lower, upper)?;
+
         let iter = TwoMergeIterator::create(
             MergeIterator::create(mem_iters),
-            MergeIterator::create(sst_iters),
+            TwoMergeIterator::create(MergeIterator::create(l0_sst_iters), l1_sst_iter)?,
         )?;
         LsmIterator::new(iter).map(FusedIterator::new)
     }
