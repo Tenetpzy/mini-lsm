@@ -525,7 +525,10 @@ impl LsmStorageInner {
         let mut l1_ssts: Vec<Arc<SsTable>> = Vec::new();
         for sst_id in &snapshot.levels[0].1 {
             let sst = snapshot.get_sst(*sst_id);
-            l1_ssts.push(Arc::clone(sst));
+
+            if sst.range_overlap(lower, upper) {
+                l1_ssts.push(Arc::clone(sst));
+            }
         }
 
         let l1_sst_iter = SstConcatRangeIterator::create(l1_ssts, lower, upper)?;
