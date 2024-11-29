@@ -72,6 +72,33 @@ impl LsmStorageState {
     pub(crate) fn get_sst(&self, sst_id: usize) -> &Arc<SsTable> {
         self.sstables.get(&sst_id).unwrap()
     }
+
+    pub(crate) fn get_sst_id_in_level(&self, level: usize) -> &Vec<usize> {
+        if level == 0 {
+            &self.l0_sstables
+        } else {
+            // levels中索引从0开始，但外层level从1开始
+            &self.levels[level - 1].1
+        }
+    }
+
+    /// 丢弃level对应的sstid数组的尾部长度为len_to_trunc_tail的部分
+    pub(crate) fn trunc_level(&mut self, level: usize, len_to_trunc_tail: usize) {
+        if level == 0 {
+            self.l0_sstables.truncate(self.l0_sstables.len() - len_to_trunc_tail);
+        } else {
+            let target = &mut self.levels[level - 1].1;
+            target.truncate(target.len() - len_to_trunc_tail);
+        }
+    }
+
+    pub(crate) fn append_tail_to_level(&mut self, level: usize, new_ssts: &[usize]) {
+        if level == 0 {
+            self.l0_sstables.extend(new_ssts);
+        } else {
+            self.levels[level - 1].1.extend(new_ssts);
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
