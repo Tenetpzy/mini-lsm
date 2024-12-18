@@ -85,7 +85,8 @@ impl LsmStorageState {
     /// 丢弃level对应的sstid数组的尾部长度为len_to_trunc_tail的部分
     pub(crate) fn trunc_level(&mut self, level: usize, len_to_trunc_tail: usize) {
         if level == 0 {
-            self.l0_sstables.truncate(self.l0_sstables.len() - len_to_trunc_tail);
+            self.l0_sstables
+                .truncate(self.l0_sstables.len() - len_to_trunc_tail);
         } else {
             let target = &mut self.levels[level - 1].1;
             target.truncate(target.len() - len_to_trunc_tail);

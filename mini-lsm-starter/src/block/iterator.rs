@@ -143,7 +143,7 @@ struct CompressedKeySlice<'a> {
     suffix: &'a [u8],
 }
 
-impl<'a> CompressedKeySlice<'a> {
+impl CompressedKeySlice<'_> {
     fn iter(&self) -> impl Iterator<Item = &u8> {
         self.prefix.iter().chain(self.suffix.iter())
     }

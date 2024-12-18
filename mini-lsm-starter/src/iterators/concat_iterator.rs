@@ -92,15 +92,12 @@ impl StorageIterator for SstConcatIterator {
     }
 
     fn next(&mut self) -> Result<()> {
-        match &mut self.current {
-            Some(iter) => {
-                iter.next()?;
-                if !iter.is_valid() {
-                    self.seek_to_idx(self.next_sst_idx)?;
-                }
+        if let Some(iter) = &mut self.current {
+            iter.next()?;
+            if !iter.is_valid() {
+                self.seek_to_idx(self.next_sst_idx)?;
             }
-            None => (),
-        };
+        }
         Ok(())
     }
 

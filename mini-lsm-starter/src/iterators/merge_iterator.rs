@@ -2,11 +2,8 @@ use std::cmp::{self};
 use std::collections::binary_heap::PeekMut;
 use std::collections::BinaryHeap;
 
-use anyhow::Result;
-
-use crate::key::KeySlice;
-
 use super::StorageIterator;
+use anyhow::Result;
 
 struct HeapWrapper<I: StorageIterator>(pub usize, pub Box<I>);
 
@@ -57,12 +54,13 @@ impl<I: StorageIterator> MergeIterator<I> {
     }
 }
 
-impl<I: 'static + for<'a> StorageIterator<KeyType<'a> = KeySlice<'a>>> StorageIterator
-    for MergeIterator<I>
-{
-    type KeyType<'a> = KeySlice<'a>;
+impl<I: StorageIterator> StorageIterator for MergeIterator<I> {
+    type KeyType<'a>
+        = I::KeyType<'a>
+    where
+        Self: 'a;
 
-    fn key(&self) -> KeySlice {
+    fn key(&self) -> Self::KeyType<'_> {
         self.iters.peek().unwrap().1.key()
     }
 

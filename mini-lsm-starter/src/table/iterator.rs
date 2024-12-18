@@ -88,23 +88,20 @@ impl StorageIterator for SsTableIterator {
     /// Move to the next `key` in the block.
     /// Note: You may want to check if the current block iterator is valid after the move.
     fn next(&mut self) -> Result<()> {
-        match &mut self.blk_iter {
-            Some(iter) => {
-                iter.next();
-                if !iter.is_valid() {
-                    self.blk_idx += 1;
+        if let Some(iter) = &mut self.blk_iter {
+            iter.next();
+            if !iter.is_valid() {
+                self.blk_idx += 1;
 
-                    if self.blk_idx >= self.table.num_of_blocks() {
-                        // 遍历SST结束了
-                        self.blk_iter = None;
-                    } else {
-                        // 还有下一个块
-                        let block = self.table.read_block_cached(self.blk_idx)?;
-                        self.blk_iter = Some(BlockIterator::create_and_seek_to_first(block));
-                    }
+                if self.blk_idx >= self.table.num_of_blocks() {
+                    // 遍历SST结束了
+                    self.blk_iter = None;
+                } else {
+                    // 还有下一个块
+                    let block = self.table.read_block_cached(self.blk_idx)?;
+                    self.blk_iter = Some(BlockIterator::create_and_seek_to_first(block));
                 }
             }
-            None => (),
         }
 
         Ok(())

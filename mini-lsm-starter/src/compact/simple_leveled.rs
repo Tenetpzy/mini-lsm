@@ -94,13 +94,8 @@ impl SimpleLeveledCompactionController {
     }
 
     fn need_l0_compact(&self, snapshot: &LsmStorageState) -> bool {
-        if (snapshot.l0_sstables.len() >= self.options.level0_file_num_compaction_trigger)
+        (snapshot.l0_sstables.len() >= self.options.level0_file_num_compaction_trigger)
             && self.need_level_compact(snapshot, 0)
-        {
-            true
-        } else {
-            false
-        }
     }
 
     // upper_level 和 upper_level + 1 是否需要compaction
@@ -110,10 +105,8 @@ impl SimpleLeveledCompactionController {
 
         if upper_len == 0 {
             false
-        } else if lower_len / upper_len * 100 < self.options.size_ratio_percent {
-            true
         } else {
-            false
+            lower_len / upper_len * 100 < self.options.size_ratio_percent
         }
     }
 
