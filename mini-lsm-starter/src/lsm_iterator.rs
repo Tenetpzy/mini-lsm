@@ -13,8 +13,8 @@ use crate::{
 type LsmIteratorInner = TwoMergeIterator<
     MergeIterator<MemTableIterator>, // memtable and immutable memtables
     TwoMergeIterator<
-        MergeIterator<SSTRangeIterator>, // L0 SSTs
-        SstConcatRangeIterator,          // L1 SSTs
+        MergeIterator<SSTRangeIterator>,       // L0 SSTs
+        MergeIterator<SstConcatRangeIterator>, // sorted run SSTs
     >,
 >;
 
