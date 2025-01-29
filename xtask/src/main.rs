@@ -80,7 +80,7 @@ fn check() -> Result<()> {
 
 fn test() -> Result<()> {
     println!("{}", style("cargo nextest run").bold());
-    cmd!("cargo", "nextest", "run").run()?;
+    cmd!("cargo", "nextest", "run", "--test-threads=1").run()?;
     Ok(())
 }
 

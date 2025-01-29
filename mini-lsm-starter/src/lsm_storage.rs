@@ -77,6 +77,7 @@ impl LsmStorageState {
         sst_ids.iter().map(|id| self.get_sst(*id).clone()).collect()
     }
 
+    // *_level, only used in leveled compaction
     pub(crate) fn get_sst_id_in_level(&self, level: usize) -> &Vec<usize> {
         if level == 0 {
             &self.l0_sstables
@@ -517,7 +518,11 @@ impl LsmStorageInner {
             let mut state = self.state.write();
             let mut snapshot = state.as_ref().clone();
             snapshot.imm_memtables.pop();
-            snapshot.l0_sstables.insert(0, sst_id);
+            if self.compaction_controller.flush_to_l0() {
+                snapshot.l0_sstables.insert(0, sst_id);
+            } else {
+                snapshot.levels.insert(0, (sst_id, vec![sst_id]));
+            }
             snapshot.sstables.insert(sst_id, Arc::new(sst));
             *state = Arc::new(snapshot);
         }
