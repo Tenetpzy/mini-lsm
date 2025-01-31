@@ -87,6 +87,15 @@ impl LsmStorageState {
         }
     }
 
+    pub(crate) fn get_ssts_in_level_mut(&mut self, level: usize) -> &mut Vec<usize> {
+        if level == 0 {
+            &mut self.l0_sstables
+        } else {
+            // levels中索引从0开始，但外层level从1开始
+            &mut self.levels[level - 1].1
+        }
+    }
+
     /// 丢弃level对应的sstid数组的尾部长度为len_to_trunc_tail的部分
     pub(crate) fn trunc_level(&mut self, level: usize, len_to_trunc_tail: usize) {
         if level == 0 {

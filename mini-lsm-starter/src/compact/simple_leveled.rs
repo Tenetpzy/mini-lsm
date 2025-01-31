@@ -9,6 +9,7 @@ pub struct SimpleLeveledCompactionOptions {
     pub max_levels: usize,
 }
 
+// level从1开始
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SimpleLeveledCompactionTask {
     // if upper_level is `None`, then it is L0 compaction

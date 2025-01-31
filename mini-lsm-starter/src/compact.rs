@@ -231,7 +231,40 @@ impl LsmStorageInner {
                 )?;
                 Ok(result)
             }
-            _ => unimplemented!(),
+
+            CompactionTask::Leveled(task) => {
+                // L0: TwoMerge<Merge, Concat>
+                if task.upper_level.is_none() {
+                    let mut iters: Vec<Box<SsTableIterator>> = Vec::new();
+                    for id in &task.upper_level_sst_ids {
+                        let iter = SsTableIterator::create_and_seek_to_first(
+                            snapshot.get_sst(*id).clone(),
+                        )?;
+                        iters.push(Box::new(iter));
+                    }
+                    let upper_iter = MergeIterator::create(iters);
+
+                    let lower_ssts = snapshot.get_ssts(&task.lower_level_sst_ids);
+                    let lower_iter = SstConcatIterator::create_and_seek_to_first(lower_ssts)?;
+
+                    let iter = TwoMergeIterator::create(upper_iter, lower_iter)?;
+                    result =
+                        self.compact_new_sst_from_iter(iter, task.is_lower_level_bottom_level)?;
+                } else {
+                    // others, Merge<Concat>
+                    let upper_ssts = snapshot.get_ssts(&task.upper_level_sst_ids);
+                    let upper_iter = SstConcatIterator::create_and_seek_to_first(upper_ssts)?;
+                    let lower_ssts = snapshot.get_ssts(&task.lower_level_sst_ids);
+                    let lower_iter = SstConcatIterator::create_and_seek_to_first(lower_ssts)?;
+
+                    let iter =
+                        MergeIterator::create(vec![Box::new(upper_iter), Box::new(lower_iter)]);
+                    result =
+                        self.compact_new_sst_from_iter(iter, task.is_lower_level_bottom_level)?;
+                }
+
+                Ok(result)
+            }
         }
     }
 
@@ -318,14 +351,19 @@ impl LsmStorageInner {
             println!("trigger compaction, current LSM snapshot:");
             snapshot.dump_structure();
 
-            let new_sorted_run = self.compact(&task)?;
-            let new_sst_ids: Vec<usize> = new_sorted_run.iter().map(|sst| sst.sst_id()).collect();
+            let new_ssts = self.compact(&task)?;
+            let new_sst_ids: Vec<usize> = new_ssts.iter().map(|sst| sst.sst_id()).collect();
             let delete_sst_ids;
 
             // 更新state时需要上state_lock锁，避免和L0 flush竞争，否则应用compact结果时可能丢失并发刷新的新L0
             {
                 let _state_lock_guard = self.state_lock.lock();
-                let snapshot = Arc::clone(&self.state.read());
+                let mut snapshot = self.state.read().as_ref().clone();
+
+                // Leveled compaction要求能够在snapshot中查找到新的sst
+                for sst in new_ssts {
+                    snapshot.sstables.insert(sst.sst_id(), sst);
+                }
 
                 let (mut new_state, sst_ids_to_delete) = self
                     .compaction_controller
@@ -334,9 +372,6 @@ impl LsmStorageInner {
                 // 现在，只需要删除new_state中老的sstable对象，并添加新的sstable对象，最后删除旧对象
                 for id in &sst_ids_to_delete {
                     new_state.sstables.remove(id);
-                }
-                for sst in new_sorted_run {
-                    new_state.sstables.insert(sst.sst_id(), sst);
                 }
 
                 {
