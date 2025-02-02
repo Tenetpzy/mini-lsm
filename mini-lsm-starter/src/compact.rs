@@ -406,6 +406,7 @@ impl LsmStorageInner {
                     *guard = Arc::new(new_state);
                 }
 
+                // 必须先写manifest，再删SST，否则删完SST系统断电，下次重启时系统还是用上一个快照，但找不到之前的SST了
                 self.sync_dir()?;
                 self.manifest.as_ref().unwrap().add_record(
                     &state_lock_guard,
@@ -415,6 +416,7 @@ impl LsmStorageInner {
                 delete_sst_ids = sst_ids_to_delete;
             }
 
+            // TODO: 写完manifest系统断电，造成残留SST没有被删除，需要GC
             for id in delete_sst_ids {
                 remove_file(self.path_of_sst(id))?;
             }

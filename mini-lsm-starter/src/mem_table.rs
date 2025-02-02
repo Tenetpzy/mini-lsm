@@ -70,13 +70,22 @@ impl MemTable {
     }
 
     /// Create a new mem-table with WAL
-    pub fn create_with_wal(_id: usize, _path: impl AsRef<Path>) -> Result<Self> {
-        unimplemented!()
+    pub fn create_with_wal(id: usize, path: impl AsRef<Path>) -> Result<Self> {
+        let mut memtable = Self::create(id);
+        let wal = Wal::create(path)?;
+        memtable.wal = Some(wal);
+        Ok(memtable)
     }
 
     /// Create a memtable from WAL
-    pub fn recover_from_wal(_id: usize, _path: impl AsRef<Path>) -> Result<Self> {
-        unimplemented!()
+    pub fn recover_from_wal(id: usize, path: impl AsRef<Path>) -> Result<Self> {
+        let map = Arc::new(SkipMap::new());
+        Ok(Self {
+            id,
+            wal: Some(Wal::recover(path.as_ref(), &map)?),
+            map,
+            approximate_size: AtomicUsize::new(0),
+        })
     }
 
     pub fn for_testing_put_slice(&self, key: &[u8], value: &[u8]) -> Result<()> {
@@ -109,9 +118,13 @@ impl MemTable {
         let added_size: usize = key.len() + value.len();
         self.approximate_size
             .fetch_add(added_size, Ordering::Relaxed);
-
         self.map
             .insert(Bytes::copy_from_slice(key), Bytes::copy_from_slice(value));
+
+        if let Some(ref wal) = self.wal {
+            wal.put(key, value)?;
+        }
+
         Ok(())
     }
 

@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 
-use anyhow::{anyhow, Context, Ok, Result};
+use anyhow::{Context, Ok, Result};
 use bytes::Bytes;
 use parking_lot::{Mutex, MutexGuard, RwLock};
 
@@ -235,12 +235,17 @@ impl MiniLsm {
             compaction_thread.join().unwrap();
         }
 
-        self.inner.freeze_memtable_on_close();
-        while {
-            let snapshot = self.inner.state.read();
-            !snapshot.imm_memtables.is_empty()
-        } {
-            self.inner.force_flush_next_imm_memtable()?;
+        if self.inner.options.enable_wal {
+            self.inner.sync()?;
+            self.inner.sync_dir()?;
+        } else {
+            self.inner.freeze_memtable_on_close();
+            while {
+                let snapshot = self.inner.state.read();
+                !snapshot.imm_memtables.is_empty()
+            } {
+                self.inner.force_flush_next_imm_memtable()?;
+            }
         }
 
         Ok(())
@@ -379,7 +384,6 @@ impl LsmStorageInner {
                     ManifestRecord::Compaction(task, output) => {
                         let (new_state, _) = compaction_controller
                             .apply_compaction_result(&state, &task, &output, true);
-                        // TODO: apply remove again
                         state = new_state;
                         next_sst_id =
                             next_sst_id.max(output.iter().max().copied().unwrap_or_default());
@@ -464,7 +468,10 @@ impl LsmStorageInner {
     }
 
     pub fn sync(&self) -> Result<()> {
-        unimplemented!()
+        if self.options.enable_wal {
+            self.state.read().memtable.sync_wal()?;
+        }
+        Ok(())
     }
 
     pub fn add_compaction_filter(&self, compaction_filter: CompactionFilter) {
@@ -610,32 +617,33 @@ impl LsmStorageInner {
 
     pub(super) fn sync_dir(&self) -> Result<()> {
         File::open(&self.path)
-            .map_err(|e| {
-                println!("failed to open LSM dir: {e}");
-                anyhow!(e)
-            })?
+            .context("failed to open LSM dir")?
             .sync_all()
-            .map_err(|e| {
-                println!("failed to sync LSM dir: {e}");
-                anyhow!(e)
-            })
+            .context("failed to sync LSM dir")
     }
 
     /// Force freeze the current memtable to an immutable memtable
     pub fn force_freeze_memtable(&self, state_lock_observer: &MutexGuard<'_, ()>) -> Result<()> {
         let new_table_id = self.next_sst_id();
-        let new_memtable = Arc::new(MemTable::create(new_table_id));
+        let new_memtable = if self.options.enable_wal {
+            let memtable = MemTable::create_with_wal(new_table_id, self.path_of_wal(new_table_id))?;
+            Arc::new(memtable)
+        } else {
+            Arc::new(MemTable::create(new_table_id))
+        };
 
         // holds write lock now minimizing critical section
-        {
+        let old_memtable = {
             let mut state = self.state.write();
             let mut snapshot = state.as_ref().clone();
             let old_memtable = Arc::clone(&snapshot.memtable);
-            snapshot.imm_memtables.insert(0, old_memtable);
+            snapshot.imm_memtables.insert(0, old_memtable.clone());
             snapshot.memtable = new_memtable;
             *state = Arc::new(snapshot);
-        }
+            old_memtable
+        };
 
+        old_memtable.sync_wal()?;
         self.manifest.as_ref().unwrap().add_record(
             state_lock_observer,
             ManifestRecord::NewMemtable(new_table_id),
@@ -694,6 +702,13 @@ impl LsmStorageInner {
             .as_ref()
             .unwrap()
             .add_record(&guard, ManifestRecord::Flush(sst_id))?;
+
+        // 必须写完manifest，再删除immtable的WAL。否则WAL删了，断电，manifest没有写入，
+        // 下次启动时，系统仍然使用上一个manifest快照，认为该immtable还没刷到SST，但找不到WAL，就无法恢复该immtable了
+        // TODO: 如果写完manifest，没删WAL断电，系统里会残留无用的WAL文件
+        if self.options.enable_wal {
+            std::fs::remove_file(self.path_of_wal(sst_id))?;
+        }
 
         Ok(())
     }
