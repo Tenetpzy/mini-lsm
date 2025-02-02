@@ -42,7 +42,7 @@ impl BlockBuilder {
     /// Adds a key-value pair to the block. Returns false when the block is full.
     #[must_use]
     pub fn add(&mut self, mut key: KeySlice, value: &[u8]) -> bool {
-        if self.offsets.len() == u16::MAX.into() {
+        if self.offsets.len() == u16::MAX as usize {
             return false;
         }
         let val_len = value.len();

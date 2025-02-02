@@ -39,6 +39,7 @@ use crate::iterators::two_merge_iterator::TwoMergeIterator;
 use crate::iterators::StorageIterator;
 use crate::key::KeySlice;
 use crate::lsm_storage::{LsmStorageInner, LsmStorageState};
+use crate::manifest::ManifestRecord;
 use crate::table::{SsTable, SsTableBuilder, SsTableIterator};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -308,9 +309,10 @@ impl LsmStorageInner {
         });
 
         let new_sorted_run = self.compact(&compaction_task)?;
+        let mut new_sst_ids: Vec<usize> = Vec::with_capacity(new_sorted_run.len());
 
         // 避免task拷贝，再match出来
-        let full_compaction_task = match compaction_task {
+        let full_compaction_task = match &compaction_task {
             CompactionTask::ForceFullCompaction(task) => task,
             _ => unreachable!(),
         };
@@ -323,6 +325,7 @@ impl LsmStorageInner {
             .collect();
 
         {
+            let state_lock = self.state_lock.lock();
             let mut guard = self.state.write();
             let mut state = guard.as_ref().clone();
 
@@ -341,17 +344,26 @@ impl LsmStorageInner {
 
             for sst in new_sorted_run {
                 let id = sst.sst_id();
+                new_sst_ids.push(id);
                 state.levels[0].1.push(id);
                 state.sstables.insert(id, sst);
             }
 
             *guard = Arc::new(state);
+
+            self.sync_dir()?;
+            self.manifest.as_ref().unwrap().add_record(
+                &state_lock,
+                ManifestRecord::Compaction(compaction_task, new_sst_ids),
+            )?;
         }
 
         // 删除旧SST文件
         for sst_id in compacted_sst_ids {
             remove_file(self.path_of_sst(sst_id))?;
         }
+
+        self.sync_dir()?;
 
         Ok(())
     }
@@ -372,7 +384,7 @@ impl LsmStorageInner {
 
             // 更新state时需要上state_lock锁，避免和L0 flush竞争，否则应用compact结果时可能丢失并发刷新的新L0
             {
-                let _state_lock_guard = self.state_lock.lock();
+                let state_lock_guard = self.state_lock.lock();
                 let mut snapshot = self.state.read().as_ref().clone();
 
                 // Leveled compaction要求能够在snapshot中查找到新的sst
@@ -394,12 +406,20 @@ impl LsmStorageInner {
                     *guard = Arc::new(new_state);
                 }
 
+                self.sync_dir()?;
+                self.manifest.as_ref().unwrap().add_record(
+                    &state_lock_guard,
+                    ManifestRecord::Compaction(task, new_sst_ids),
+                )?;
+
                 delete_sst_ids = sst_ids_to_delete;
             }
 
             for id in delete_sst_ids {
                 remove_file(self.path_of_sst(id))?;
             }
+
+            self.sync_dir()?;
         }
 
         Ok(())

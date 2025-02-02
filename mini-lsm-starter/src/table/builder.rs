@@ -120,7 +120,7 @@ impl SsTableBuilder {
             ],
         )?;
 
-        let meta_info = SsTMetaInfo {
+        let meta_info: SsTMetaInfo = SsTMetaInfo {
             block_meta_offset,
             block_meta_len,
             bloom_filter_offset,

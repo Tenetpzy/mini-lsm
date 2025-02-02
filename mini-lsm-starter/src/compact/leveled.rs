@@ -213,7 +213,7 @@ impl LeveledCompactionController {
         snapshot: &LsmStorageState,
         task: &LeveledCompactionTask,
         output: &[usize],
-        _in_recovery: bool,
+        in_recovery: bool,
     ) -> (LsmStorageState, Vec<usize>) {
         let mut snapshot = snapshot.clone();
         let upper_level = task.upper_level.unwrap_or(0);
@@ -254,11 +254,14 @@ impl LeveledCompactionController {
             .collect();
         assert!(lower_level_delete_set.is_empty());
 
-        new_lower_level.sort_by(|a, b| {
-            let sst_a = snapshot.get_sst(*a);
-            let sst_b = snapshot.get_sst(*b);
-            sst_a.first_key().cmp(sst_b.first_key())
-        });
+        // 在启动的恢复阶段，snapshot里没有打开SST，所以这里不能排序，要等待恢复完成后再排
+        if !in_recovery {
+            new_lower_level.sort_by(|a, b| {
+                let sst_a = snapshot.get_sst(*a);
+                let sst_b = snapshot.get_sst(*b);
+                sst_a.first_key().cmp(sst_b.first_key())
+            });
+        }
 
         *snapshot.get_ssts_in_level_mut(lower_level) = new_lower_level;
 
