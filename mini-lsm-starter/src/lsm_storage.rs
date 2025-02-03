@@ -552,8 +552,23 @@ impl LsmStorageInner {
     }
 
     /// Write a batch of data into the storage. Implement in week 2 day 7.
-    pub fn write_batch<T: AsRef<[u8]>>(&self, _batch: &[WriteBatchRecord<T>]) -> Result<()> {
-        unimplemented!()
+    pub fn write_batch<T: AsRef<[u8]>>(&self, batch: &[WriteBatchRecord<T>]) -> Result<()> {
+        let memtable_batch: Vec<(KeySlice, &[u8])> = batch
+            .iter()
+            .map(|op| match op {
+                WriteBatchRecord::Put(k, v) => (KeySlice::from_slice(k.as_ref()), v.as_ref()),
+                WriteBatchRecord::Del(k) => (KeySlice::from_slice(k.as_ref()), b"" as &[u8]),
+            })
+            .collect();
+
+        let approximate_size = {
+            let state = self.state.read();
+            state.memtable.put_batch(&memtable_batch)?;
+            state.memtable.approximate_size()
+        };
+
+        self.try_freeze(approximate_size)?;
+        Ok(())
     }
 
     /// check approximate size and freeze if needed. Caller cannot holds state or state_lock.
@@ -575,28 +590,12 @@ impl LsmStorageInner {
 
     /// Put a key-value pair into the storage by writing into the current memtable.
     pub fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
-        let approximate_size: usize;
-        {
-            let state = self.state.read();
-            state.memtable.put(key, value)?;
-            approximate_size = state.memtable.approximate_size();
-        }
-        self.try_freeze(approximate_size)?;
-        Ok(())
+        self.write_batch(&[WriteBatchRecord::Put(key, value)])
     }
 
     /// Remove a key from the storage by writing an empty value.
     pub fn delete(&self, key: &[u8]) -> Result<()> {
-        // self.state.read().memtable.put(key, &[])
-        // for delete, we shouldn't but still need to add the approximate_size because test logical.
-        let approximate_size: usize;
-        {
-            let state = self.state.read();
-            state.memtable.put(key, b"")?;
-            approximate_size = state.memtable.approximate_size();
-        }
-        self.try_freeze(approximate_size)?;
-        Ok(())
+        self.write_batch(&[WriteBatchRecord::Del(key)])
     }
 
     pub(crate) fn path_of_sst_static(path: impl AsRef<Path>, id: usize) -> PathBuf {

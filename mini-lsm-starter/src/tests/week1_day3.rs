@@ -79,7 +79,7 @@ fn test_block_encode() {
 fn test_block_decode() {
     let block = generate_block();
     let encoded = block.encode();
-    let decoded_block = Block::decode(&encoded);
+    let decoded_block = Block::decode(&encoded).unwrap();
     assert_eq!(block.offsets, decoded_block.offsets);
     assert_eq!(block.data, decoded_block.data);
 }

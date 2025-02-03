@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use bytes::BufMut;
+
 use crate::key::{KeySlice, KeyVec};
 
 use super::Block;
@@ -79,11 +81,11 @@ impl BlockBuilder {
         self.offsets.push(self.data.len() as u16);
 
         // key_len and val_len are encoded as little-endian
-        self.data.extend((key_overlap_len as u16).to_le_bytes());
-        self.data.extend((key_rest_len as u16).to_le_bytes());
-        self.data.extend(key.raw_ref());
-        self.data.extend((val_len as u16).to_le_bytes());
-        self.data.extend(value);
+        self.data.put_u16_le(key_overlap_len as u16);
+        self.data.put_u16_le(key_rest_len as u16);
+        self.data.put(key.raw_ref());
+        self.data.put_u16_le(val_len as u16);
+        self.data.put(value);
 
         true
     }

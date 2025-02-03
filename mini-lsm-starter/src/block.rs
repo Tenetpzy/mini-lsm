@@ -15,8 +15,9 @@
 mod builder;
 mod iterator;
 
+use anyhow::{ensure, Result};
 pub use builder::BlockBuilder;
-use bytes::{Bytes, BytesMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 pub use iterator::BlockIterator;
 
 /// A block is the smallest unit of read and caching in LSM tree. It is a collection of sorted key-value pairs.
@@ -31,21 +32,30 @@ impl Block {
     pub fn encode(&self) -> Bytes {
         let mut block = BytesMut::new();
 
-        block.extend(&self.data);
+        block.put(&self.data[..]);
         for offset in &self.offsets {
-            block.extend(offset.to_le_bytes());
+            block.put_u16_le(*offset);
         }
-        block.extend((self.offsets.len() as u16).to_le_bytes());
+        block.put_u16_le(self.offsets.len() as u16);
+
+        // 生成块的校验和
+        let checksum = crc32fast::hash(&block);
+        block.put_u32_le(checksum);
 
         block.freeze()
     }
 
     /// Decode from the data layout, transform the input `data` to a single `Block`
-    pub fn decode(data: &[u8]) -> Self {
-        let block_len = data.len();
+    pub fn decode(data: &[u8]) -> Result<Self> {
+        let block_len = data.len() - 4;
+        let checksum = (&data[data.len() - 4..]).get_u32_le();
+        ensure!(
+            crc32fast::hash(&data[..data.len() - 4]) == checksum,
+            "Block checksum mismatch, block corrupted?"
+        );
 
         // decode element number
-        let elem_num = u16::from_le_bytes([data[block_len - 2], data[block_len - 1]]) as usize;
+        let elem_num = (&data[block_len - 2..block_len]).get_u16_le() as usize;
 
         // decode offsets
         let offset_end_idx = block_len - 2;
@@ -54,15 +64,15 @@ impl Block {
 
         let offsets: Vec<u16> = offset_part
             .chunks_exact(2)
-            .map(|offset_byte| u16::from_le_bytes([offset_byte[0], offset_byte[1]]))
+            .map(|mut offset_byte| offset_byte.get_u16_le())
             .collect();
 
         // decode KVs
         let kv_data = Vec::from(&data[..offset_start_idx]);
 
-        Block {
+        Ok(Block {
             data: kv_data,
             offsets,
-        }
+        })
     }
 }

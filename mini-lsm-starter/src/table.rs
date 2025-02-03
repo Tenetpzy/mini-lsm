@@ -23,9 +23,9 @@ use std::ops::Bound;
 use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, ensure, Result};
 pub use builder::SsTableBuilder;
-use bytes::Buf;
+use bytes::{Buf, BufMut};
 pub use iterator::SSTRangeIterator;
 pub use iterator::SsTableIterator;
 
@@ -61,18 +61,28 @@ impl BlockMeta {
     /// BlockMeta_number (le u64) | BlockMeta | ... | BlockMeta
     /// each BlockMeta: offset(le u64) | first_key_len(le u64) | first_key | last_key_len(le u64) | last_key
     pub fn encode_block_meta(block_meta: &[BlockMeta], buf: &mut Vec<u8>) {
-        buf.extend((block_meta.len() as u64).to_le_bytes());
+        buf.put_u64_le(block_meta.len() as u64);
         for meta in block_meta {
-            buf.extend((meta.offset as u64).to_le_bytes());
-            buf.extend((meta.first_key.len() as u64).to_le_bytes());
-            buf.extend(meta.first_key.raw_ref());
-            buf.extend((meta.last_key.len() as u64).to_le_bytes());
-            buf.extend(meta.last_key.raw_ref());
+            buf.put_u64_le(meta.offset as u64);
+            buf.put_u64_le(meta.first_key.len() as u64);
+            buf.put(meta.first_key.raw_ref());
+            buf.put_u64_le(meta.last_key.len() as u64);
+            buf.put(meta.last_key.raw_ref());
         }
+
+        // 增加block meta区域校验和
+        let checksum = crc32fast::hash(buf);
+        buf.put_u32_le(checksum);
     }
 
     /// Decode block meta from a buffer.
-    pub fn decode_block_meta(mut buf: impl Buf) -> Vec<BlockMeta> {
+    pub fn decode_block_meta(mut buf: &[u8]) -> Result<Vec<BlockMeta>> {
+        let checksum = (&buf[buf.len() - 4..]).get_u32_le();
+        ensure!(
+            crc32fast::hash(&buf[..buf.len() - 4]) == checksum,
+            "Block Meta checksum mismatch, block meta corrupted?"
+        );
+
         let cnt = buf.get_u64_le();
         let mut res: Vec<BlockMeta> = Vec::new();
 
@@ -86,7 +96,7 @@ impl BlockMeta {
             res.push(BlockMeta::new(offset as usize, first_key, last_key));
         }
 
-        res
+        Ok(res)
     }
 }
 
@@ -170,7 +180,7 @@ impl SsTable {
         let meta_info = Self::decode_meta_info(&file)?;
 
         let block_meta_buf = file.read(meta_info.block_meta_offset, meta_info.block_meta_len)?;
-        let block_meta = BlockMeta::decode_block_meta(&block_meta_buf[..]);
+        let block_meta = BlockMeta::decode_block_meta(&block_meta_buf[..])?;
 
         let bloom_buf = file.read(meta_info.bloom_filter_offset, meta_info.bloom_filter_len)?;
         let bloom = Bloom::decode(&bloom_buf)?;
@@ -252,8 +262,8 @@ impl SsTable {
         let block_len = block_end - block_start;
 
         let block = self.file.read(block_start as u64, block_len as u64)?;
-        let block = Arc::new(Block::decode(&block));
-        Ok(block)
+        let block = Block::decode(&block)?;
+        Ok(Arc::new(block))
     }
 
     /// Read a block from disk, with block cache. (Day 4)
@@ -312,18 +322,12 @@ impl SsTable {
     }
 
     fn decode_meta_info(file: &FileObject) -> Result<SsTMetaInfo> {
-        let encode_bloom_offset: [u8; 4] = file
-            .read(file.size() - 4, 4)?
-            .try_into()
-            .map_err(|_| anyhow!("failed to transfer bloom offset: Vec<u8> -> [u8; 4]"))?;
-        let bloom_filter_offset = u32::from_le_bytes(encode_bloom_offset) as u64;
+        let encode_bloom_offset = file.read(file.size() - 4, 4)?;
+        let bloom_filter_offset = (&encode_bloom_offset[..]).get_u32_le() as u64;
         let bloom_filter_len = file.size() - 4 - bloom_filter_offset;
 
-        let encode_meta_offset: [u8; 4] = file
-            .read(bloom_filter_offset - 4, 4)?
-            .try_into()
-            .map_err(|_| anyhow!("failed to transfer meta offset: Vec<u8> -> [u8; 4]"))?;
-        let block_meta_offset = u32::from_le_bytes(encode_meta_offset) as u64;
+        let encode_meta_offset = file.read(bloom_filter_offset - 4, 4)?;
+        let block_meta_offset = (&encode_meta_offset[..]).get_u32_le() as u64;
         let block_meta_len = bloom_filter_offset - 4 - block_meta_offset;
 
         Ok(SsTMetaInfo {

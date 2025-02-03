@@ -17,7 +17,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::Result;
-use bytes::Bytes;
+use bytes::{BufMut, Bytes};
 
 use super::bloom::Bloom;
 use super::{BlockMeta, SsTMetaInfo, SsTable};
@@ -148,7 +148,7 @@ impl SsTableBuilder {
                 KeyBytes::from_bytes(self.last_key.clone()),
             );
 
-            self.data.extend(builder.build().encode());
+            self.data.put(builder.build().encode());
             self.meta.push(meta);
 
             self.first_key = Bytes::new();
