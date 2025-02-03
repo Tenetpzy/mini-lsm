@@ -12,9 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
-#![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
-
 use std::sync::Arc;
 
 use crate::key::{KeySlice, KeyVec};
@@ -31,19 +28,19 @@ pub struct BlockIterator {
     value_range: (usize, usize),
     /// Current index of the key-value pair, should be in range of [0, num_of_elements)
     idx: usize,
-    /// The first key in the block
-    first_key: KeyVec,
+    // /// The first key in the block
+    // first_key: KeyVec,
 }
 
 impl BlockIterator {
     fn new(block: Arc<Block>) -> Self {
-        let first_key = block.get_key_on_idx(0);
+        // let first_key = block.get_key_on_idx(0);
         Self {
             block,
             key: KeyVec::new(),
             value_range: (0, 0),
             idx: 0,
-            first_key,
+            // first_key,
         }
     }
 

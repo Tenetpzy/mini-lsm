@@ -12,9 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
-#![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
-
 mod full_compact;
 mod leveled;
 mod simple_leveled;
@@ -50,16 +47,16 @@ pub enum CompactionTask {
     ForceFullCompaction(FullCompactionTask),
 }
 
-impl CompactionTask {
-    fn compact_to_bottom_level(&self) -> bool {
-        match self {
-            CompactionTask::ForceFullCompaction { .. } => true,
-            CompactionTask::Leveled(task) => task.is_lower_level_bottom_level,
-            CompactionTask::Simple(task) => task.is_lower_level_bottom_level,
-            CompactionTask::Tiered(task) => task.bottom_tier_included,
-        }
-    }
-}
+// impl CompactionTask {
+//     fn compact_to_bottom_level(&self) -> bool {
+//         match self {
+//             CompactionTask::ForceFullCompaction { .. } => true,
+//             CompactionTask::Leveled(task) => task.is_lower_level_bottom_level,
+//             CompactionTask::Simple(task) => task.is_lower_level_bottom_level,
+//             CompactionTask::Tiered(task) => task.bottom_tier_included,
+//         }
+//     }
+// }
 
 pub(crate) enum CompactionController {
     Leveled(LeveledCompactionController),

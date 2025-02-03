@@ -308,12 +308,4 @@ impl LeveledCompactionController {
 
         level_sizes
     }
-
-    fn level_cur_size(snapshot: &LsmStorageState, level: usize) -> usize {
-        snapshot.levels[level]
-            .1
-            .iter()
-            .map(|sst_id| snapshot.get_sst(*sst_id).table_size() as usize)
-            .sum()
-    }
 }
