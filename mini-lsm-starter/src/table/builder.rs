@@ -17,7 +17,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::Result;
-use bytes::{BufMut, Bytes};
+use bytes::BufMut;
 
 use super::bloom::Bloom;
 use super::{BlockMeta, SsTMetaInfo, SsTable};
@@ -31,8 +31,8 @@ use crate::{
 /// Builds an SSTable from key-value pairs.
 pub struct SsTableBuilder {
     builder: BlockBuilder,
-    first_key: Bytes,
-    last_key: Bytes,
+    first_key: KeyBytes,
+    last_key: KeyBytes,
     data: Vec<u8>,
     pub(crate) meta: Vec<BlockMeta>,
     key_hashs: Vec<u32>,
@@ -45,8 +45,8 @@ impl SsTableBuilder {
     pub fn new(block_size: usize) -> Self {
         Self {
             builder: BlockBuilder::new(block_size),
-            first_key: Bytes::new(),
-            last_key: Bytes::new(),
+            first_key: KeyBytes::new(),
+            last_key: KeyBytes::new(),
             data: Vec::with_capacity(256 * 1024 * 1024),
             meta: Vec::new(),
             key_hashs: Vec::new(),
@@ -67,11 +67,11 @@ impl SsTableBuilder {
         }
 
         if self.first_key.is_empty() {
-            self.first_key = Bytes::copy_from_slice(key.raw_ref());
+            self.first_key = key.to_key_bytes();
         }
-        self.last_key = Bytes::copy_from_slice(key.raw_ref());
+        self.last_key = key.to_key_bytes();
 
-        self.key_hashs.push(SsTable::key_hash(key.raw_ref()));
+        self.key_hashs.push(SsTable::key_hash(key.key_ref()));
     }
 
     /// Get the estimated size of the SSTable.
@@ -144,14 +144,14 @@ impl SsTableBuilder {
             let builder = std::mem::replace(&mut self.builder, BlockBuilder::new(self.block_size));
             let meta = BlockMeta::new(
                 self.data.len(),
-                KeyBytes::from_bytes(self.first_key.clone()),
-                KeyBytes::from_bytes(self.last_key.clone()),
+                self.first_key.clone(),
+                self.last_key.clone(),
             );
 
             self.data.put(builder.build().encode());
             self.meta.push(meta);
 
-            self.first_key = Bytes::new();
+            self.first_key = KeyBytes::new();
         }
     }
 

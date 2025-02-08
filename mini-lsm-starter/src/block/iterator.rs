@@ -12,13 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
+use std::{
+    cmp::{Ordering, Reverse},
+    sync::Arc,
+};
+
+use bytes::Buf;
 
 use crate::key::{KeySlice, KeyVec};
 
 use super::Block;
 
 /// Iterates on a block.
+#[derive(Clone)]
 pub struct BlockIterator {
     /// The internal `Block`, wrapped by an `Arc`
     block: Arc<Block>,
@@ -91,6 +97,57 @@ impl BlockIterator {
         self.seek_to_index(self.block.binary_search_key_index(key));
     }
 
+    // /// 定位到下一个值不同的，小于读时间戳read_ts的具有最大时间戳的key。用于MVCC读的优化。
+    // pub fn seek_to_next_key_with_ts(&mut self, read_ts: u64) {
+    //     loop {
+    //         self.seek_to_next_key();
+    //         if self.try_seek_to_cur_key_with_ts(read_ts) {
+    //             break;
+    //         } else if !self.is_valid() {
+    //             break;
+    //         }
+    //     }
+    // }
+
+    // /// 定位到下一个值不同的key的最新版本，而不是相同key的旧版本
+    // pub fn seek_to_next_key(&mut self) {
+    //     if self.is_valid() {
+    //         // 查找大于(cur_key_ref, TS_RANGE_END)的键，即是下一个值不同的key
+    //         let key = KeySlice::from_slice(self.key.key_ref(), TS_RANGE_END);
+    //         let mut idx = self.block.binary_search_key_index(key);
+    //         if idx < self.block.offsets.len() {
+    //             if self.block.get_key_silce_on_idx(idx).iter().eq(key.key_ref()) {
+    //                 idx += 1;
+    //                 if idx < self.block.offsets.len() {
+    //                     assert!(!self.block.get_key_silce_on_idx(idx).iter().eq(key.key_ref()));
+    //                 }
+    //             }
+    //         }
+    //         self.seek_to_index(idx);
+    //     }
+    // }
+
+    // /// 尝试定位到当前key满足读时间戳read_ts的最大版本。如果成功返回true，如果不存在这样的版本，迭代器不移动并返回false
+    // pub fn try_seek_to_cur_key_with_ts(&mut self, read_ts: u64) -> bool {
+    //     if self.is_valid() {
+    //         let key = KeySlice::from_slice(self.key.key_ref(), read_ts);
+    //         let idx = self.block.binary_search_key_index(key);
+    //         if idx < self.block.offsets.len() {
+    //             if self.block.get_key_silce_on_idx(idx).iter().eq(key.key_ref()) {
+    //                 // 找到符合的版本了
+    //                 self.seek_to_index(idx);
+    //                 true
+    //             } else {
+    //                 false
+    //             }
+    //         } else {
+    //             false
+    //         }
+    //     } else {
+    //         false
+    //     }
+    // }
+
     fn seek_to_index(&mut self, idx: usize) {
         if idx >= self.block.offsets.len() {
             self.key.clear();
@@ -126,24 +183,28 @@ impl Block {
         self.get_key_silce_on_idx(idx).to_key_vec()
     }
 
+    // kv encoding:
+    // key_overlap_len(u16) | key_rest_len(u16) | key(key_rest_len) | timestamp(u64) | val_len(u16) | value(val_len)
     fn get_value_range_on_idx(&self, idx: usize) -> (usize, usize) {
         let off = self.offsets[idx] as usize;
-        let key_rest_len = u16::from_le_bytes([self.data[off + 2], self.data[off + 3]]) as usize;
-        let off = off + 4 + key_rest_len;
-        let val_len = u16::from_le_bytes([self.data[off], self.data[off + 1]]) as usize;
+        let key_rest_len = (&self.data[off + 2..off + 4]).get_u16_le() as usize;
+        let off = off + 12 + key_rest_len; // 12: u16 + u16 + u64
+        let val_len = (&self.data[off..off + 2]).get_u16_le() as usize;
         (off + 2, off + 2 + val_len)
     }
 
     fn get_key_silce_on_idx(&self, idx: usize) -> CompressedKeySlice {
         let off = self.offsets[idx] as usize;
-        let key_overlap_len = u16::from_le_bytes([self.data[off], self.data[off + 1]]) as usize;
-        let key_rest_len = u16::from_le_bytes([self.data[off + 2], self.data[off + 3]]) as usize;
-
+        let key_overlap_len = (&self.data[off..off + 2]).get_u16_le() as usize;
+        let key_rest_len = (&self.data[off + 2..off + 4]).get_u16_le() as usize;
+        let ts_off = off + 4 + key_rest_len;
+        let ts = (&self.data[ts_off..ts_off + 8]).get_u64_le();
         let first_key_off = self.offsets[0] as usize + 4;
         let key_off = off + 4;
         CompressedKeySlice {
             prefix: &self.data[first_key_off..first_key_off + key_overlap_len],
             suffix: &self.data[key_off..key_off + key_rest_len],
+            ts,
         }
     }
 }
@@ -152,6 +213,7 @@ impl Block {
 struct CompressedKeySlice<'a> {
     prefix: &'a [u8],
     suffix: &'a [u8],
+    ts: u64,
 }
 
 impl CompressedKeySlice<'_> {
@@ -163,18 +225,29 @@ impl CompressedKeySlice<'_> {
         let mut keyvec = KeyVec::new();
         keyvec.append(self.prefix);
         keyvec.append(self.suffix);
+        keyvec.set_ts(self.ts);
         keyvec
     }
 }
 
 impl PartialEq<KeySlice<'_>> for CompressedKeySlice<'_> {
     fn eq(&self, other: &KeySlice<'_>) -> bool {
-        self.iter().eq(other.raw_ref().iter())
+        // self.iter().eq(other.raw_ref().iter())
+        self.iter().eq(other.key_ref().iter()) && self.ts == other.ts()
     }
 }
 
 impl PartialOrd<KeySlice<'_>> for CompressedKeySlice<'_> {
-    fn partial_cmp(&self, other: &KeySlice<'_>) -> Option<std::cmp::Ordering> {
-        self.iter().partial_cmp(other.raw_ref().iter())
+    fn partial_cmp(&self, other: &KeySlice<'_>) -> Option<Ordering> {
+        // 这里需要手动实现字典序，因为self.iter()返回的迭代器类型是自动推断的，没有为它实现比较方法，否则可以用元组
+        self.iter()
+            .partial_cmp(other.key_ref().iter())
+            .and_then(|ord| {
+                if ord == Ordering::Equal {
+                    Reverse(self.ts).partial_cmp(&Reverse(other.ts()))
+                } else {
+                    Some(ord)
+                }
+            })
     }
 }

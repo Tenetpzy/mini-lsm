@@ -26,7 +26,7 @@ use std::sync::Arc;
 use anyhow::{anyhow, ensure, Result};
 pub use builder::SsTableBuilder;
 use bytes::{Buf, BufMut};
-pub use iterator::SSTRangeIterator;
+pub use iterator::SSTRangeSnapshotIterator;
 pub use iterator::SsTableIterator;
 
 use crate::block::Block;
@@ -58,16 +58,21 @@ impl BlockMeta {
     /// You may add extra fields to the buffer,
     /// in order to help keep track of `first_key` when decoding from the same buffer in the future.  
     /// encode format:  
-    /// BlockMeta_number (le u64) | BlockMeta | ... | BlockMeta
-    /// each BlockMeta: offset(le u64) | first_key_len(le u64) | first_key | last_key_len(le u64) | last_key
+    /// BlockMeta_number (le u64) | BlockMeta | ... | BlockMeta | checksum(le u64)
+    /// each BlockMeta:
+    /// offset(le u64) | first_key_len(le u64) | first_key | first_key_ts(le u64) | last_key_len(le u64) | last_key | last_key_ts(le u64)
     pub fn encode_block_meta(block_meta: &[BlockMeta], buf: &mut Vec<u8>) {
         buf.put_u64_le(block_meta.len() as u64);
         for meta in block_meta {
             buf.put_u64_le(meta.offset as u64);
-            buf.put_u64_le(meta.first_key.len() as u64);
-            buf.put(meta.first_key.raw_ref());
-            buf.put_u64_le(meta.last_key.len() as u64);
-            buf.put(meta.last_key.raw_ref());
+
+            buf.put_u64_le(meta.first_key.key_len() as u64);
+            buf.put(meta.first_key.key_ref());
+            buf.put_u64_le(meta.first_key.ts());
+
+            buf.put_u64_le(meta.last_key.key_len() as u64);
+            buf.put(meta.last_key.key_ref());
+            buf.put_u64_le(meta.last_key.ts());
         }
 
         // 增加block meta区域校验和
@@ -88,10 +93,16 @@ impl BlockMeta {
 
         for _ in 0..cnt {
             let offset = buf.get_u64_le();
+
             let first_key_len = buf.get_u64_le();
-            let first_key = KeyBytes::from_bytes(buf.copy_to_bytes(first_key_len as usize));
+            let first_key = buf.copy_to_bytes(first_key_len as usize);
+            let first_key_ts = buf.get_u64_le();
+            let first_key = KeyBytes::from_bytes_with_ts(first_key, first_key_ts);
+
             let last_key_len = buf.get_u64_le();
-            let last_key = KeyBytes::from_bytes(buf.copy_to_bytes(last_key_len as usize));
+            let last_key = buf.copy_to_bytes(last_key_len as usize);
+            let last_key_ts = buf.get_u64_le();
+            let last_key = KeyBytes::from_bytes_with_ts(last_key, last_key_ts);
 
             res.push(BlockMeta::new(offset as usize, first_key, last_key));
         }
@@ -339,11 +350,6 @@ impl SsTable {
         })
     }
 
-    /// 检查key是否在本sst的`[first_key, last_key]`之间，是返回true
-    pub(crate) fn key_within(&self, key: KeySlice) -> bool {
-        key >= self.first_key.as_key_slice() && key <= self.last_key.as_key_slice()
-    }
-
     /// 检查本SST的`[first_key, last_key]`和参数key的大小关系  
     /// `first_key > key`为greater, `last_key < key`为less, `first_key <= key <= last_key`为equal
     pub(crate) fn cmp_range_with_key(&self, key: KeySlice) -> Ordering {
@@ -357,19 +363,49 @@ impl SsTable {
     }
 
     /// 检查[start, end]是否与本sst的`[first_key, last_key]`有交叠，有返回true
-    pub(crate) fn range_overlap(&self, start: Bound<&[u8]>, end: Bound<&[u8]>) -> bool {
+    fn range_overlap(&self, start: Bound<KeySlice>, end: Bound<KeySlice>) -> bool {
         let on_right = match start {
-            Bound::Included(start) => start > self.last_key.raw_ref(),
-            Bound::Excluded(start) => start >= self.last_key.raw_ref(),
+            Bound::Included(start) => start > self.last_key.as_key_slice(),
+            Bound::Excluded(start) => start >= self.last_key.as_key_slice(),
             Bound::Unbounded => false,
         };
         let on_left = match end {
-            Bound::Included(end) => end < self.first_key.raw_ref(),
-            Bound::Excluded(end) => end <= self.first_key.raw_ref(),
+            Bound::Included(end) => end < self.first_key.as_key_slice(),
+            Bound::Excluded(end) => end <= self.first_key.as_key_slice(),
             Bound::Unbounded => false,
         };
 
         !(on_left || on_right)
+    }
+
+    /// 检查本SST是否有可能包含[lower, upper]中一部分键
+    pub(crate) fn may_contain(&self, lower: Bound<KeySlice>, upper: Bound<KeySlice>) -> bool {
+        if !self.range_overlap(lower, upper) {
+            false
+        } else {
+            // 检查这个范围是否只是单个键值的不同版本（由get调用），此时可以用布隆过滤器优化
+            let single_key = match lower {
+                Bound::Excluded(lower) | Bound::Included(lower) => match upper {
+                    Bound::Included(upper) | Bound::Excluded(upper) => {
+                        if lower == upper {
+                            Some(lower.key_ref())
+                        } else {
+                            None
+                        }
+                    }
+                    Bound::Unbounded => None,
+                },
+                Bound::Unbounded => None,
+            };
+
+            // 如果不是单个键，返回可能包含
+            // 如果是单个键：如果有布隆过滤器，返回布隆过滤器的结果，否则返回可能包含
+            single_key.map_or(true, |key| {
+                self.bloom
+                    .as_ref()
+                    .map_or(true, |bloom| bloom.may_contain(SsTable::key_hash(key)))
+            })
+        }
     }
 
     pub fn key_hash(key: &[u8]) -> u32 {

@@ -18,6 +18,7 @@ mod simple_leveled;
 mod tiered;
 
 use std::fs::remove_file;
+use std::mem::transmute;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -125,40 +126,48 @@ pub enum CompactionOptions {
     NoCompaction,
 }
 
+fn get_iter_key<'a, I: StorageIterator<KeyType<'a> = KeySlice<'a>> + 'a>(iter: &I) -> KeySlice<'_> {
+    unsafe { transmute(transmute::<&'_ I, &'_ I>(iter).key()) }
+}
+
 impl LsmStorageInner {
     /// 'a是无界生命周期，此处避免使用for<'a>限制I导致I: 'static  
     ///
     /// SAFETY:
     /// 1. 此函数不会返回一个'a生命周期的值，所以函数接口是安全的  
-    /// 2. 内部实现中，在get_key返回的具有'a生命周期的值存活时，不会再次从iter借用，符合借用栈原则，无UB  
+    /// 2. 内部实现中，在get_iter_key返回的值存活时，不会再次从iter借用，符合借用栈原则，无UB  
     ///
     /// NOTE：就算需要将返回值传出，也可以使用TwoMergeIterator中的方法，将'a限制到和&self相同，也是安全的
     fn compact_new_sst_from_iter<'a, I: StorageIterator<KeyType<'a> = KeySlice<'a>> + 'a>(
         &self,
         mut iter: I,
-        involved_bottom_level: bool,
+        _involved_bottom_level: bool,
     ) -> Result<Vec<Arc<SsTable>>> {
-        let get_key = |iter: &I| -> I::KeyType<'a> {
-            unsafe { std::mem::transmute::<&'_ I, &'a I>(iter).key() }
-        };
-
         let mut builder = SsTableBuilder::new(self.options.block_size);
         let mut result: Vec<Arc<SsTable>> = Vec::new();
+        let mut prev_key: Vec<u8> = Vec::new();
 
         while iter.is_valid() {
             // 只有压实操作包含了最底层时，才能跳过已经删除的键。否则读压实后的SST时可能读到更下层的无效值
-            if iter.value().is_empty() && involved_bottom_level {
-                iter.next()?;
-                continue;
-            }
+            // note: 增加了MVCC后，不能忽略已删除的键，因为可能有旧事务在读
+            // if iter.value().is_empty() && involved_bottom_level {
+            //     iter.next()?;
+            //     continue;
+            // }
 
-            if builder.estimated_size() > self.options.target_sst_size {
+            // 保证同一个key的不同版本都在一个SST中，简化其它模块
+            let cur_key = get_iter_key(&iter);
+            if builder.estimated_size() > self.options.target_sst_size
+                && cur_key.key_ref() != prev_key
+            {
                 let sst = self.create_new_sst(builder)?;
                 result.push(Arc::new(sst));
                 builder = SsTableBuilder::new(self.options.block_size);
             }
 
-            builder.add(get_key(&iter), iter.value());
+            prev_key.clear();
+            prev_key.extend(cur_key.key_ref());
+            builder.add(cur_key, iter.value());
             iter.next()?;
         }
 
@@ -313,6 +322,17 @@ impl LsmStorageInner {
             CompactionTask::ForceFullCompaction(task) => task,
             _ => unreachable!(),
         };
+
+        // TODO: Remove me
+        println!(
+            "Force full compaction: compact L0:{:?}, L1:{:?} to L1:{:?}",
+            full_compaction_task.l0_sstables,
+            full_compaction_task.l1_sstables,
+            new_sorted_run
+                .iter()
+                .map(|sst| sst.sst_id())
+                .collect::<Vec<usize>>()
+        );
 
         let compacted_sst_ids: Vec<usize> = full_compaction_task
             .l0_sstables

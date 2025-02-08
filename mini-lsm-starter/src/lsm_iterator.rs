@@ -16,35 +16,59 @@ use anyhow::{anyhow, Result};
 
 use crate::{
     iterators::{
-        concat_iterator::SstConcatRangeIterator, merge_iterator::MergeIterator,
+        concat_iterator::SstRangeConcatSnapshotIterator, merge_iterator::MergeIterator,
         two_merge_iterator::TwoMergeIterator, StorageIterator,
     },
-    mem_table::MemTableIterator,
-    table::SSTRangeIterator,
+    mem_table::MemTableSnapshotIterator,
+    table::SSTRangeSnapshotIterator,
 };
 
 /// Represents the internal type for an LSM iterator. This type will be changed across the tutorial for multiple times.
 type LsmIteratorInner = TwoMergeIterator<
-    MergeIterator<MemTableIterator>, // memtable and immutable memtables
+    MergeIterator<MemTableSnapshotIterator>, // memtable and immutable memtables
     TwoMergeIterator<
-        MergeIterator<SSTRangeIterator>,       // L0 SSTs
-        MergeIterator<SstConcatRangeIterator>, // sorted run SSTs
+        MergeIterator<SSTRangeSnapshotIterator>,       // L0 SSTs
+        MergeIterator<SstRangeConcatSnapshotIterator>, // sorted run SSTs
     >,
 >;
 
+/// LSM get/scan接口使用的迭代器
+/// 1. 对任何一个键，只返回指定的read_ts下的最新版本
+/// 2. 如果最新版本是删除，则不返回这个键
 pub struct LsmIterator {
     inner: LsmIteratorInner,
+    cur_key: Vec<u8>,
 }
 
 impl LsmIterator {
     pub(crate) fn new(iter: LsmIteratorInner) -> Result<Self> {
-        let mut lsm_iter = Self { inner: iter };
-        lsm_iter.pass_deleted_keys()?;
+        let mut lsm_iter = Self {
+            inner: iter,
+            cur_key: Vec::new(),
+        };
+        lsm_iter.seek_to_next_non_empty_key()?;
         Ok(lsm_iter)
     }
 
-    fn pass_deleted_keys(&mut self) -> Result<()> {
-        while self.inner.is_valid() && (self.inner.value().is_empty()) {
+    fn seek_to_next_non_empty_key(&mut self) -> Result<()> {
+        self.pass_older_version_of_currnet_key()?;
+
+        // 去掉被删除的键
+        while self.inner.is_valid() {
+            self.cur_key.clear();
+            self.cur_key.extend(self.inner.key().key_ref());
+
+            if self.inner.value().is_empty() {
+                self.pass_older_version_of_currnet_key()?;
+            } else {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    fn pass_older_version_of_currnet_key(&mut self) -> Result<()> {
+        while self.inner.is_valid() && self.inner.key().key_ref() == self.cur_key {
             self.inner.next()?;
         }
         Ok(())
@@ -59,7 +83,7 @@ impl StorageIterator for LsmIterator {
     }
 
     fn key(&self) -> &[u8] {
-        self.inner.key().raw_ref()
+        self.inner.key().key_ref()
     }
 
     fn value(&self) -> &[u8] {
@@ -67,9 +91,7 @@ impl StorageIterator for LsmIterator {
     }
 
     fn next(&mut self) -> Result<()> {
-        self.inner.next()?;
-        self.pass_deleted_keys()?;
-        Ok(())
+        self.seek_to_next_non_empty_key()
     }
 
     fn num_active_iterators(&self) -> usize {

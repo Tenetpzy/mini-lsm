@@ -56,21 +56,22 @@ impl BlockBuilder {
         let key_rest_len: usize;
 
         if self.first_key.is_empty() {
-            self.first_key.append(key.raw_ref());
+            self.first_key = key.to_key_vec();
             key_overlap_len = 0;
-            key_rest_len = key.len();
+            key_rest_len = key.key_len();
         } else {
             // 不是第一个key，使用前缀压缩，只记录和第一个key不同的后缀部分
-            let key_len = key.len();
+            let key_len = key.key_len();
             key = self.remove_common_prefix_of_first_key(key);
-            key_rest_len = key.len();
+            key_rest_len = key.key_len();
 
             // 现在可以做容量检查了
-            if key_rest_len > u16::MAX.into() {
+            if key.raw_len() > u16::MAX.into() {
                 return false;
             }
-            // 4: key_overlap_len(u16) + key_rest_len(u16) + value_len(u16) + offset(u16)
-            let new_entry_extra_len = key_rest_len + val_len + 4 * size_of::<u16>();
+            // key_rest + key_overlap_len(u16) + key_rest_len(u16) + timestamp(u64) + value_len(u16) + offset(u16)
+            let new_entry_extra_len =
+                key_rest_len + val_len + 4 * size_of::<u16>() + size_of::<u64>();
             if self.current_size() + new_entry_extra_len > self.block_size {
                 return false;
             }
@@ -80,10 +81,11 @@ impl BlockBuilder {
 
         self.offsets.push(self.data.len() as u16);
 
-        // key_len and val_len are encoded as little-endian
+        // key_len, timestamp, val_len are encoded as little-endian
         self.data.put_u16_le(key_overlap_len as u16);
         self.data.put_u16_le(key_rest_len as u16);
-        self.data.put(key.raw_ref());
+        self.data.put(key.key_ref());
+        self.data.put_u64_le(key.ts());
         self.data.put_u16_le(val_len as u16);
         self.data.put(value);
 
@@ -110,11 +112,11 @@ impl BlockBuilder {
     /// 将key和first_key的最长公共前缀从key中移除，返回后缀
     fn remove_common_prefix_of_first_key<'a>(&self, key: KeySlice<'a>) -> KeySlice<'a> {
         let prefix_len = key
-            .raw_ref()
+            .key_ref()
             .iter()
-            .zip(self.first_key.raw_ref())
+            .zip(self.first_key.key_ref())
             .take_while(|(a, b)| a == b)
             .count();
-        KeySlice::from_slice(&key.raw_ref()[prefix_len..])
+        KeySlice::from_slice(&key.key_ref()[prefix_len..], key.ts())
     }
 }

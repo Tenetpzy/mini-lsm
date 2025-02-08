@@ -13,12 +13,12 @@
 // limitations under the License.
 
 use anyhow::Result;
+use bytes::Bytes;
 use std::{ops::Bound, sync::Arc};
 
 use super::StorageIterator;
 use crate::{
-    key::{KeyBytes, KeySlice},
-    mem_table::map_bound_keybytes,
+    key::KeySlice,
     table::{SsTable, SsTableIterator},
 };
 
@@ -41,6 +41,17 @@ impl SstConcatIterator {
         }
     }
 
+    pub fn create_and_seek_to_first_with_ts(
+        sstables: Vec<Arc<SsTable>>,
+        read_ts: u64,
+    ) -> Result<Self> {
+        let mut iter = Self::create_and_seek_to_first(sstables)?;
+        if !iter.try_seek_to_cur_key_with_ts(read_ts)? {
+            iter.seek_to_next_key_with_ts(read_ts)?;
+        }
+        Ok(iter)
+    }
+
     /// seek to the first element which >= key
     pub fn create_and_seek_to_key(sstables: Vec<Arc<SsTable>>, key: KeySlice) -> Result<Self> {
         let idx = match sstables.binary_search_by(|sst| sst.cmp_range_with_key(key)) {
@@ -53,6 +64,41 @@ impl SstConcatIterator {
             // 这个iter一定是有效的，因为上面二分搜索时sst区间是闭区间
             let iter = SsTableIterator::create_and_seek_to_key(Arc::clone(&sstables[idx]), key)?;
             Ok(Self::create(iter, idx + 1, sstables))
+        }
+    }
+
+    pub fn create_and_seek_to_key_with_ts(
+        sstables: Vec<Arc<SsTable>>,
+        key: KeySlice,
+    ) -> Result<Self> {
+        let mut iter = Self::create_and_seek_to_key(sstables, key)?;
+        if !iter.try_seek_to_cur_key_with_ts(key.ts())? {
+            iter.seek_to_next_key_with_ts(key.ts())?;
+        }
+        Ok(iter)
+    }
+
+    fn seek_to_next_key_with_ts(&mut self, read_ts: u64) -> Result<()> {
+        if !self.is_valid() {
+            Ok(())
+        } else {
+            let sst_iter = self.current.as_mut().unwrap();
+            sst_iter.seek_to_next_key_with_ts(read_ts)?;
+            if !sst_iter.is_valid() {
+                self.seek_to_next_sst_with_ts(read_ts)
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    fn try_seek_to_cur_key_with_ts(&mut self, read_ts: u64) -> Result<bool> {
+        match &mut self.current {
+            Some(sst_iter) => {
+                // compaction保证了一个key的多版本只会在一个SST中，这里只用做一次
+                sst_iter.try_seek_to_cur_key_with_ts(read_ts)
+            }
+            None => Ok(false),
         }
     }
 
@@ -87,6 +133,26 @@ impl SstConcatIterator {
             Ok(())
         }
     }
+
+    /// 定位到下一个，能够从中找到一个满足时间戳read_ts的键的SST，或者定位到末尾
+    fn seek_to_next_sst_with_ts(&mut self, read_ts: u64) -> Result<()> {
+        if self.next_sst_idx >= self.sstables.len() {
+            self.set_invalid();
+            Ok(())
+        } else {
+            let iter = SsTableIterator::create_and_seek_to_first_with_ts(
+                Arc::clone(&self.sstables[self.next_sst_idx]),
+                read_ts,
+            )?;
+            self.next_sst_idx += 1;
+            if iter.is_valid() {
+                self.current = Some(iter);
+                Ok(())
+            } else {
+                self.seek_to_next_key_with_ts(read_ts)
+            }
+        }
+    }
 }
 
 impl StorageIterator for SstConcatIterator {
@@ -119,35 +185,40 @@ impl StorageIterator for SstConcatIterator {
     }
 }
 
-pub struct SstConcatRangeIterator {
+pub struct SstRangeConcatSnapshotIterator {
     iter_inner: SstConcatIterator,
-    upper: Bound<KeyBytes>,
+    upper: Bound<Bytes>,
+    read_ts: u64,
 }
 
-impl SstConcatRangeIterator {
+impl SstRangeConcatSnapshotIterator {
     pub fn create(
         sstables: Vec<Arc<SsTable>>,
         lower: Bound<&[u8]>,
         upper: Bound<&[u8]>,
+        read_ts: u64,
     ) -> Result<Self> {
-        let iter_inner = match lower {
-            Bound::Unbounded => SstConcatIterator::create_and_seek_to_first(sstables)?,
-            Bound::Included(key) => {
-                SstConcatIterator::create_and_seek_to_key(sstables, KeySlice::from_slice(key))?
+        let mut iter_inner = match lower {
+            Bound::Unbounded => {
+                SstConcatIterator::create_and_seek_to_first_with_ts(sstables, read_ts)?
             }
-            Bound::Excluded(key) => {
-                let key = KeySlice::from_slice(key);
-                let mut iter = SstConcatIterator::create_and_seek_to_key(sstables, key)?;
-                if iter.is_valid() && iter.key() == key {
-                    iter.next()?;
-                }
-                iter
+            Bound::Included(key) | Bound::Excluded(key) => {
+                SstConcatIterator::create_and_seek_to_key_with_ts(
+                    sstables,
+                    KeySlice::from_slice(key, read_ts),
+                )?
             }
         };
+        if let Bound::Excluded(key) = lower {
+            if iter_inner.is_valid() && iter_inner.key().key_ref() == key {
+                iter_inner.seek_to_next_key_with_ts(read_ts)?;
+            }
+        }
 
         let mut iter = Self {
             iter_inner,
-            upper: map_bound_keybytes(upper),
+            upper: upper.map(Bytes::copy_from_slice),
+            read_ts,
         };
         iter.check_upper_bound();
         Ok(iter)
@@ -158,12 +229,12 @@ impl SstConcatRangeIterator {
             match &self.upper {
                 Bound::Unbounded => (),
                 Bound::Included(key) => {
-                    if self.iter_inner.key() > key.as_key_slice() {
+                    if self.iter_inner.key().key_ref() > key {
                         self.iter_inner.set_invalid();
                     }
                 }
                 Bound::Excluded(key) => {
-                    if self.iter_inner.key() >= key.as_key_slice() {
+                    if self.iter_inner.key().key_ref() >= key {
                         self.iter_inner.set_invalid();
                     }
                 }
@@ -172,7 +243,7 @@ impl SstConcatRangeIterator {
     }
 }
 
-impl StorageIterator for SstConcatRangeIterator {
+impl StorageIterator for SstRangeConcatSnapshotIterator {
     type KeyType<'a> = <SstConcatIterator as StorageIterator>::KeyType<'a>;
 
     fn value(&self) -> &[u8] {
@@ -188,7 +259,7 @@ impl StorageIterator for SstConcatRangeIterator {
     }
 
     fn next(&mut self) -> Result<()> {
-        self.iter_inner.next()?;
+        self.iter_inner.seek_to_next_key_with_ts(self.read_ts)?;
         self.check_upper_bound();
         Ok(())
     }
