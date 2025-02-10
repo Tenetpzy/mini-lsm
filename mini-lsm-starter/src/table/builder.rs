@@ -33,6 +33,7 @@ pub struct SsTableBuilder {
     builder: BlockBuilder,
     first_key: KeyBytes,
     last_key: KeyBytes,
+    max_ts: u64,
     data: Vec<u8>,
     pub(crate) meta: Vec<BlockMeta>,
     key_hashs: Vec<u32>,
@@ -47,6 +48,7 @@ impl SsTableBuilder {
             builder: BlockBuilder::new(block_size),
             first_key: KeyBytes::new(),
             last_key: KeyBytes::new(),
+            max_ts: 0,
             data: Vec::with_capacity(256 * 1024 * 1024),
             meta: Vec::new(),
             key_hashs: Vec::new(),
@@ -70,7 +72,7 @@ impl SsTableBuilder {
             self.first_key = key.to_key_bytes();
         }
         self.last_key = key.to_key_bytes();
-
+        self.max_ts = self.max_ts.max(key.ts());
         self.key_hashs.push(SsTable::key_hash(key.key_ref()));
     }
 
@@ -109,6 +111,8 @@ impl SsTableBuilder {
         let bloom_filter_len = encoded_bloom_filter.len() as u64;
         let encoded_bloom_filter_off = (bloom_filter_offset as u32).to_le_bytes();
 
+        let encoded_max_ts = self.max_ts.to_le_bytes();
+
         let file_object = FileObject::create(
             path.as_ref(),
             &[
@@ -117,6 +121,7 @@ impl SsTableBuilder {
                 IoSlice::new(&encoded_block_meta_off),
                 IoSlice::new(&encoded_bloom_filter),
                 IoSlice::new(&encoded_bloom_filter_off),
+                IoSlice::new(&encoded_max_ts),
             ],
         )?;
 
@@ -135,7 +140,7 @@ impl SsTableBuilder {
             id,
             block_cache,
             Some(bloom),
-            0,
+            self.max_ts,
         ))
     }
 

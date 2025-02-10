@@ -141,11 +141,13 @@ impl LsmStorageInner {
     fn compact_new_sst_from_iter<'a, I: StorageIterator<KeyType<'a> = KeySlice<'a>> + 'a>(
         &self,
         mut iter: I,
-        _involved_bottom_level: bool,
+        involved_bottom_level: bool,
     ) -> Result<Vec<Arc<SsTable>>> {
         let mut builder = SsTableBuilder::new(self.options.block_size);
         let mut result: Vec<Arc<SsTable>> = Vec::new();
         let mut prev_key: Vec<u8> = Vec::new();
+        let watermark = self.mvcc().watermark();
+        let mut in_keys_below_watermark = false;
 
         while iter.is_valid() {
             // 只有压实操作包含了最底层时，才能跳过已经删除的键。否则读压实后的SST时可能读到更下层的无效值
@@ -155,8 +157,32 @@ impl LsmStorageInner {
             //     continue;
             // }
 
-            // 保证同一个key的不同版本都在一个SST中，简化其它模块
             let cur_key = get_iter_key(&iter);
+            if cur_key.key_ref() == prev_key {
+                if in_keys_below_watermark {
+                    assert!(cur_key.ts() < watermark);
+                    iter.next()?;
+                    continue; // 之前保留了一个版本不高于watermark的key，当前的删除
+                }
+            } else {
+                // 遇到不同的key了，重置gc_flag
+                in_keys_below_watermark = false;
+            }
+
+            // GC: 版本低于watermark的只保留最新版，版本高于watermark的保留
+            if cur_key.ts() <= watermark {
+                in_keys_below_watermark = true; // 后面遇到的key相同的都删除
+
+                // 如果最新版达到底层并且已经是墓碑，就直接删除(后面的也会删除)
+                if iter.value().is_empty() && involved_bottom_level {
+                    prev_key.clear();
+                    prev_key.extend(cur_key.key_ref());
+                    iter.next()?;
+                    continue;
+                }
+            }
+
+            // 保证同一个key的不同版本都在一个SST中，简化其它模块
             if builder.estimated_size() > self.options.target_sst_size
                 && cur_key.key_ref() != prev_key
             {
