@@ -18,30 +18,20 @@
 pub mod txn;
 pub mod watermark;
 
-use std::{
-    collections::{BTreeMap, HashSet},
-    sync::Arc,
-};
+use std::{collections::BTreeMap, sync::Arc};
 
 use parking_lot::Mutex;
+use txn::WriteSet;
 
 use crate::lsm_storage::LsmStorageInner;
 
 use self::{txn::Transaction, watermark::Watermark};
 
-pub(crate) struct CommittedTxnData {
-    pub(crate) key_hashes: HashSet<u32>,
-    #[allow(dead_code)]
-    pub(crate) read_ts: u64,
-    #[allow(dead_code)]
-    pub(crate) commit_ts: u64,
-}
-
 pub(crate) struct LsmMvccInner {
     pub(crate) write_lock: Mutex<()>,
     pub(crate) commit_lock: Mutex<()>,
     pub(crate) ts: Arc<Mutex<(u64, Watermark)>>,
-    pub(crate) committed_txns: Arc<Mutex<BTreeMap<u64, CommittedTxnData>>>,
+    pub(crate) committed_txns: Arc<Mutex<BTreeMap<u64, WriteSet>>>,
 }
 
 impl LsmMvccInner {
@@ -74,6 +64,10 @@ impl LsmMvccInner {
             self.latest_commit_ts(),
             serializable,
         ))
+    }
+
+    pub fn committed_txns(&self) -> &Arc<Mutex<BTreeMap<u64, WriteSet>>> {
+        &self.committed_txns
     }
 
     fn watermark_add_ts(&self, read_ts: u64) {

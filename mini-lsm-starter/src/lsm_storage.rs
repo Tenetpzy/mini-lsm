@@ -12,9 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
-#![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
-
 use std::collections::{BTreeSet, HashMap};
 use std::fs::File;
 use std::ops::Bound;
@@ -496,8 +493,29 @@ impl LsmStorageInner {
     }
 
     /// Write a batch of data into the storage. Implement in week 2 day 7.
-    pub fn write_batch<T: AsRef<[u8]>>(&self, batch: &[WriteBatchRecord<T>]) -> Result<()> {
-        let approximate_size = {
+    pub fn write_batch<T: AsRef<[u8]>>(
+        self: &Arc<Self>,
+        batch: &[WriteBatchRecord<T>],
+    ) -> Result<()> {
+        if self.options.serializable {
+            // 创建一个事务写入来满足串行化
+            let txn = self.new_txn()?;
+            for record in batch {
+                match record {
+                    WriteBatchRecord::Put(k, v) => txn.put(k.as_ref(), v.as_ref()),
+                    WriteBatchRecord::Del(k) => txn.delete(k.as_ref()),
+                }
+            }
+            txn.commit()?;
+        } else {
+            self.direct_write_batch(batch)?;
+        }
+        Ok(())
+    }
+
+    /// 直接原子地提交一个写批次，不包含事务的SSI验证，返回提交时间戳
+    pub fn direct_write_batch<T: AsRef<[u8]>>(&self, batch: &[WriteBatchRecord<T>]) -> Result<u64> {
+        let (approximate_size, commit_ts) = {
             let mvcc = self.mvcc();
             let _guard = mvcc.write_lock.lock();
             let ts = mvcc.latest_commit_ts() + 1;
@@ -519,11 +537,11 @@ impl LsmStorageInner {
 
             mvcc.update_commit_ts(ts); // 本事务数据全部写完之前，新事务读不到，保证提交原子性，所以写完再改时间戳
 
-            state.memtable.approximate_size()
+            (state.memtable.approximate_size(), ts)
         };
 
         self.try_freeze(approximate_size)?;
-        Ok(())
+        Ok(commit_ts)
     }
 
     /// check approximate size and freeze if needed. Caller cannot holds state or state_lock.
@@ -544,12 +562,12 @@ impl LsmStorageInner {
     }
 
     /// Put a key-value pair into the storage by writing into the current memtable.
-    pub fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
+    pub fn put(self: &Arc<Self>, key: &[u8], value: &[u8]) -> Result<()> {
         self.write_batch(&[WriteBatchRecord::Put(key, value)])
     }
 
     /// Remove a key from the storage by writing an empty value.
-    pub fn delete(&self, key: &[u8]) -> Result<()> {
+    pub fn delete(self: &Arc<Self>, key: &[u8]) -> Result<()> {
         self.write_batch(&[WriteBatchRecord::Del(key)])
     }
 
