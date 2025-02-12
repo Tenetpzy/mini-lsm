@@ -501,7 +501,6 @@ impl LsmStorageInner {
             let mvcc = self.mvcc();
             let _guard = mvcc.write_lock.lock();
             let ts = mvcc.latest_commit_ts() + 1;
-            mvcc.update_commit_ts(ts);
 
             let memtable_batch: Vec<(KeySlice, &[u8])> = batch
                 .iter()
@@ -517,6 +516,9 @@ impl LsmStorageInner {
 
             let state = self.state.read();
             state.memtable.put_batch(&memtable_batch)?;
+
+            mvcc.update_commit_ts(ts); // 本事务数据全部写完之前，新事务读不到，保证提交原子性，所以写完再改时间戳
+
             state.memtable.approximate_size()
         };
 

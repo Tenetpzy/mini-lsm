@@ -113,11 +113,12 @@ impl MemTable {
             self.approximate_size
                 .fetch_add(k.raw_len() + v.len(), Ordering::Relaxed);
             self.map.insert(k.to_key_bytes(), Bytes::copy_from_slice(v));
-
-            if let Some(wal) = &self.wal {
-                wal.put(*k, v)?;
-            }
         }
+
+        if let Some(wal) = &self.wal {
+            wal.put_batch(data)?;
+        }
+
         Ok(())
     }
 
